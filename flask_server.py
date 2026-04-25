@@ -38,6 +38,8 @@ except ImportError:
 app = Flask(__name__)
 CORS(app, origins=["https://pcbworkspace-serc.github.io"])
 
+# Load model at import time so gunicorn workers have it ready
+
 CHECKPOINT_PATH = "jepa_checkpoint.pt"
 COMPONENT_CLASSES = [
     "Resistor","Capacitor","Diode","LED","Transistor",
@@ -116,6 +118,9 @@ def load_model():
         else:
             print("  No checkpoint found — run train.py first for accurate results")
         _model.eval()
+
+# Call load_model at import time (for gunicorn) AND below for python flask_server.py
+load_model()
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
