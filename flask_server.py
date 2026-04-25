@@ -36,7 +36,7 @@ except ImportError:
     JEPA_AVAILABLE = False
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=["https://pcbworkspace-serc.github.io"])
 
 CHECKPOINT_PATH = "jepa_checkpoint.pt"
 COMPONENT_CLASSES = [
