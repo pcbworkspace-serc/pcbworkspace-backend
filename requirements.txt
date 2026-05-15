@@ -5,3 +5,5 @@ torch==2.9.0+cpu
 torchvision==0.24.0+cpu
 pillow>=11.0.0
 gunicorn==21.2.0
+ultralytics>=8.0.0
+opencv-python-headless>=4.8.0

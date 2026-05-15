@@ -1,13 +1,15 @@
 """
 flask_server.py — PCBWorkspace SERC backend
 
-Endpoints matching the frontend in pcbworkspace-v2/src/lib/nn.ts:
-  /health                 - liveness probe
-  /nn/status              - model info + paper metrics
-  /nn/detect              - whole-image multi-label classification
-  /nn/detect_boxes        - multi-scale sliding-window detection + NMS
-  /nn/align               - alignment correction (stub, not trained)
-  /nn/validate            - placement validation (stub, not trained)
+Endpoints:
+  /health                       — liveness probe
+  /nn/status                    — model info, paper metrics, method availability
+  /nn/detect                    — whole-image multi-label classification
+  /nn/detect_boxes              — sliding window (Method A: fixed 64px grid)
+  /nn/detect_boxes_sliding      — alias for /nn/detect_boxes
+  /nn/detect_boxes_yolo         — YOLO + MobileNetV3 hybrid (Method B)
+  /nn/align                     — alignment correction (stub)
+  /nn/validate                  — placement validation (stub)
 """
 
 import io, time
@@ -31,10 +33,12 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
-from pcb_jepa_nn import CLASS_NAMES, load_model
+from pcb_jepa_nn import CLASS_NAMES, load_model, load_yolo_detector
 
 CHECKPOINT_PATH = "best.pt"
+YOLO_WEIGHTS_PATH = "yolov8_pcb.pt"
 MODEL_NAME = "MobileNetV3-Small (multi-label, FPIC, paper mAP 0.636)"
+HYBRID_NAME = "YOLOv8n (box proposer) + MobileNetV3-Small (classifier)"
 
 app = Flask(__name__)
 CORS(app, origins=[
@@ -45,17 +49,24 @@ CORS(app, origins=[
 
 _model = None
 _model_loaded = False
+_yolo = None
 _device = "cuda" if (TORCH_AVAILABLE and torch.cuda.is_available()) else "cpu"
 
 
 def _ensure_model():
-    global _model, _model_loaded
+    global _model, _model_loaded, _yolo
     if _model is None and TORCH_AVAILABLE:
         _model, _model_loaded = load_model(CHECKPOINT_PATH, device=_device)
         if _model_loaded:
             print(f"  Loaded MobileNetV3-Small weights from {CHECKPOINT_PATH}")
         else:
             print(f"  WARN: {CHECKPOINT_PATH} not found — running with random init")
+        # Wrap with the YOLO hybrid detector (lazy-loads YOLO weights on first /nn/detect_boxes_yolo call)
+        _yolo = load_yolo_detector(_model, YOLO_WEIGHTS_PATH)
+        if _yolo.weights_path.exists():
+            print(f"  YOLO weights detected at {YOLO_WEIGHTS_PATH} (lazy-loaded on first request)")
+        else:
+            print(f"  WARN: {YOLO_WEIGHTS_PATH} missing — /nn/detect_boxes_yolo will return unavailable")
     return _model
 
 
@@ -75,11 +86,8 @@ def _request_to_pil():
         return None
 
 
-# Load at import time so gunicorn workers get it
 _ensure_model()
 
-
-# ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route("/health")
 def health():
@@ -88,6 +96,7 @@ def health():
         "torch": TORCH_AVAILABLE,
         "pil": PIL_AVAILABLE,
         "model_loaded": _model_loaded,
+        "yolo_available": _yolo.available if _yolo else False,
         "trained": _model_loaded,
         "device": _device,
     })
@@ -96,6 +105,7 @@ def health():
 @app.route("/nn/status")
 def nn_status():
     params = sum(p.numel() for p in _model.parameters()) if _model else 0
+    yolo_status = _yolo.status if _yolo else {"weights_exists": False, "loaded": False}
     return jsonify({
         "phase": "trained" if _model_loaded else "untrained",
         "loaded": _model is not None,
@@ -112,12 +122,24 @@ def nn_status():
             "macro_precision_at_0.5": 0.782,
             "macro_recall_at_0.5": 0.423,
         },
+        "methods": {
+            "sliding_window": {
+                "endpoint": "/nn/detect_boxes",
+                "available": _model_loaded,
+                "description": "Fixed-grid 64px windows at scales 256/384/576, per-class NMS",
+            },
+            "yolo_hybrid": {
+                "endpoint": "/nn/detect_boxes_yolo",
+                "available": yolo_status["weights_exists"] and _model_loaded,
+                "weights": yolo_status,
+                "description": "YOLOv8n proposes boxes, MobileNetV3 classifies each crop",
+            },
+        },
     })
 
 
 @app.route("/nn/detect", methods=["POST"])
 def nn_detect():
-    """Whole-image multi-label classification (sigmoid scores)."""
     t0 = time.perf_counter()
     model = _ensure_model()
     if model is None:
@@ -125,12 +147,9 @@ def nn_detect():
     img = _request_to_pil()
     if img is None:
         return jsonify({
-            "predictions": [],
-            "num_classes": len(CLASS_NAMES),
-            "model": MODEL_NAME,
-            "model_kind": "classifier",
-            "trained": _model_loaded,
-            "inference_ms": 0.0,
+            "predictions": [], "num_classes": len(CLASS_NAMES),
+            "model": MODEL_NAME, "model_kind": "classifier",
+            "trained": _model_loaded, "inference_ms": 0.0,
             "error": "no image provided",
         }), 400
     result = model.infer_multilabel(img)
@@ -141,9 +160,10 @@ def nn_detect():
     return jsonify(result)
 
 
+# ── Method A: sliding window ──────────────────────────────────────────────────
 @app.route("/nn/detect_boxes", methods=["POST"])
+@app.route("/nn/detect_boxes_sliding", methods=["POST"])
 def nn_detect_boxes():
-    """Multi-scale sliding-window detection with per-class NMS."""
     t0 = time.perf_counter()
     model = _ensure_model()
     if model is None:
@@ -151,19 +171,47 @@ def nn_detect_boxes():
     img = _request_to_pil()
     if img is None:
         return jsonify({"error": "no image provided"}), 400
-    out = model.detect_boxes(img)
+    out = model.detect_boxes_sliding(img)
     out["model"] = MODEL_NAME
+    out["inference_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+    return jsonify(out)
+
+
+# ── Method B: YOLO + classifier ───────────────────────────────────────────────
+@app.route("/nn/detect_boxes_yolo", methods=["POST"])
+def nn_detect_boxes_yolo():
+    t0 = time.perf_counter()
+    model = _ensure_model()
+    if model is None:
+        return jsonify({"error": "Classifier not loaded"}), 503
+    if _yolo is None or not _yolo.available:
+        return jsonify({
+            "error": "YOLO weights not available",
+            "boxes": [], "n_proposals": 0,
+            "method": "yolo_hybrid",
+            "available": False,
+            "reason": (f"{YOLO_WEIGHTS_PATH} missing — train via PCB_YOLO_Detection.ipynb "
+                       f"and place in backend folder"),
+        }), 503
+    img = _request_to_pil()
+    if img is None:
+        return jsonify({"error": "no image provided"}), 400
+    try:
+        out = _yolo.detect(img)
+    except (FileNotFoundError, ImportError) as e:
+        return jsonify({
+            "error": str(e), "boxes": [], "n_proposals": 0,
+            "method": "yolo_hybrid", "available": False,
+        }), 503
+    out["model"] = HYBRID_NAME
     out["inference_ms"] = round((time.perf_counter() - t0) * 1000, 1)
     return jsonify(out)
 
 
 @app.route("/nn/align", methods=["POST"])
 def nn_align():
-    """Not trained on this checkpoint — return unavailable."""
     return jsonify({
-        "delta_theta_deg": 0.0,
-        "delta_x_mm": 0.0,
-        "delta_y_mm": 0.0,
+        "delta_theta_deg": 0.0, "delta_x_mm": 0.0, "delta_y_mm": 0.0,
         "available": False,
         "reason": "AlignmentHead not trained — only component classifier has weights",
         "inference_ms": 0.0,
@@ -172,18 +220,13 @@ def nn_align():
 
 @app.route("/nn/validate", methods=["POST"])
 def nn_validate():
-    """Not trained on this checkpoint — return unavailable."""
     return jsonify({
-        "decision": "PASS",
-        "pass_prob": 0.0,
-        "fail_prob": 0.0,
+        "decision": "PASS", "pass_prob": 0.0, "fail_prob": 0.0,
         "available": False,
         "reason": "DefectHead not trained — only component classifier has weights",
         "inference_ms": 0.0,
     })
 
-
-# ── Frontend compatibility stubs ──────────────────────────────────────────────
 
 @app.route("/nn/items", methods=["POST"])
 def nn_items():
@@ -200,16 +243,15 @@ def chat():
     return jsonify({"reply": "[stub] keep your existing chat route here"})
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     print("=" * 60)
-    print(" PCBWorkspace Flask Server — MobileNetV3-Small (FPIC)")
-    print(f" PyTorch  : {'YES' if TORCH_AVAILABLE else 'NO'}")
-    print(f" Pillow   : {'YES' if PIL_AVAILABLE else 'NO'}")
-    print(f" Weights  : {'LOADED' if _model_loaded else 'MISSING (random init)'}")
-    print(f" Classes  : {len(CLASS_NAMES)}")
-    print(f" Device   : {_device}")
-    print(f" URL      : http://127.0.0.1:5000")
+    print(" PCBWorkspace Flask Server")
+    print(f" PyTorch     : {'YES' if TORCH_AVAILABLE else 'NO'}")
+    print(f" Pillow      : {'YES' if PIL_AVAILABLE else 'NO'}")
+    print(f" MobileNet   : {'LOADED' if _model_loaded else 'MISSING (random init)'}")
+    print(f" YOLO        : {'AVAILABLE' if (_yolo and _yolo.available) else 'MISSING'}")
+    print(f" Classes     : {len(CLASS_NAMES)}")
+    print(f" Device      : {_device}")
+    print(f" URL         : http://127.0.0.1:5000")
     print("=" * 60)
     app.run(host="127.0.0.1", port=5000, debug=False, threaded=True)
