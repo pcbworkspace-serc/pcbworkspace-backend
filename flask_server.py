@@ -1,15 +1,5 @@
 """
-flask_server.py — PCBWorkspace SERC backend
-
-Endpoints:
-  /health                       — liveness probe
-  /nn/status                    — model info, paper metrics, method availability
-  /nn/detect                    — whole-image multi-label classification
-  /nn/detect_boxes              — sliding window (Method A: fixed 64px grid)
-  /nn/detect_boxes_sliding      — alias for /nn/detect_boxes
-  /nn/detect_boxes_yolo         — YOLO + MobileNetV3 hybrid (Method B)
-  /nn/align                     — alignment correction (stub)
-  /nn/validate                  — placement validation (stub)
+flask_server.py — PCBWorkspace SERC backend (with eager YOLO preload)
 """
 
 import io, time
@@ -61,10 +51,14 @@ def _ensure_model():
             print(f"  Loaded MobileNetV3-Small weights from {CHECKPOINT_PATH}")
         else:
             print(f"  WARN: {CHECKPOINT_PATH} not found — running with random init")
-        # Wrap with the YOLO hybrid detector (lazy-loads YOLO weights on first /nn/detect_boxes_yolo call)
-        _yolo = load_yolo_detector(_model, YOLO_WEIGHTS_PATH)
-        if _yolo.weights_path.exists():
-            print(f"  YOLO weights detected at {YOLO_WEIGHTS_PATH} (lazy-loaded on first request)")
+
+        # PRE-LOAD YOLO eagerly so the first /nn/detect_boxes_yolo isn't slow.
+        # Adds ~5s to startup time but cuts first-request latency dramatically.
+        _yolo = load_yolo_detector(_model, YOLO_WEIGHTS_PATH, eager=True)
+        if _yolo.status.get("loaded"):
+            print(f"  Pre-loaded YOLOv8n weights from {YOLO_WEIGHTS_PATH}")
+        elif _yolo.weights_path.exists():
+            print(f"  YOLO weights present but eager-load failed; will retry on first request")
         else:
             print(f"  WARN: {YOLO_WEIGHTS_PATH} missing — /nn/detect_boxes_yolo will return unavailable")
     return _model
@@ -97,6 +91,7 @@ def health():
         "pil": PIL_AVAILABLE,
         "model_loaded": _model_loaded,
         "yolo_available": _yolo.available if _yolo else False,
+        "yolo_loaded": (_yolo.status.get("loaded", False) if _yolo else False),
         "trained": _model_loaded,
         "device": _device,
     })
@@ -160,7 +155,6 @@ def nn_detect():
     return jsonify(result)
 
 
-# ── Method A: sliding window ──────────────────────────────────────────────────
 @app.route("/nn/detect_boxes", methods=["POST"])
 @app.route("/nn/detect_boxes_sliding", methods=["POST"])
 def nn_detect_boxes():
@@ -177,7 +171,6 @@ def nn_detect_boxes():
     return jsonify(out)
 
 
-# ── Method B: YOLO + classifier ───────────────────────────────────────────────
 @app.route("/nn/detect_boxes_yolo", methods=["POST"])
 def nn_detect_boxes_yolo():
     t0 = time.perf_counter()
@@ -190,8 +183,7 @@ def nn_detect_boxes_yolo():
             "boxes": [], "n_proposals": 0,
             "method": "yolo_hybrid",
             "available": False,
-            "reason": (f"{YOLO_WEIGHTS_PATH} missing — train via PCB_YOLO_Detection.ipynb "
-                       f"and place in backend folder"),
+            "reason": f"{YOLO_WEIGHTS_PATH} missing",
         }), 503
     img = _request_to_pil()
     if img is None:
@@ -213,7 +205,7 @@ def nn_align():
     return jsonify({
         "delta_theta_deg": 0.0, "delta_x_mm": 0.0, "delta_y_mm": 0.0,
         "available": False,
-        "reason": "AlignmentHead not trained — only component classifier has weights",
+        "reason": "AlignmentHead not trained",
         "inference_ms": 0.0,
     })
 
@@ -223,7 +215,7 @@ def nn_validate():
     return jsonify({
         "decision": "PASS", "pass_prob": 0.0, "fail_prob": 0.0,
         "available": False,
-        "reason": "DefectHead not trained — only component classifier has weights",
+        "reason": "DefectHead not trained",
         "inference_ms": 0.0,
     })
 
@@ -249,7 +241,7 @@ if __name__ == "__main__":
     print(f" PyTorch     : {'YES' if TORCH_AVAILABLE else 'NO'}")
     print(f" Pillow      : {'YES' if PIL_AVAILABLE else 'NO'}")
     print(f" MobileNet   : {'LOADED' if _model_loaded else 'MISSING (random init)'}")
-    print(f" YOLO        : {'AVAILABLE' if (_yolo and _yolo.available) else 'MISSING'}")
+    print(f" YOLO        : {'LOADED' if (_yolo and _yolo.status.get('loaded')) else 'MISSING'}")
     print(f" Classes     : {len(CLASS_NAMES)}")
     print(f" Device      : {_device}")
     print(f" URL         : http://127.0.0.1:5000")

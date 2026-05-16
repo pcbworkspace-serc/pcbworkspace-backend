@@ -4,8 +4,6 @@ pcb_jepa_nn.py — PCBWorkspace SERC backend
 Two detection paths:
   1. Sliding window — fixed-grid 64×64 windows at multi-scale, MobileNetV3 classifies each
   2. YOLO hybrid    — YOLOv8n proposes boxes, MobileNetV3 classifies each crop
-
-Frontend lets the user toggle between them.
 """
 
 from dataclasses import dataclass, field
@@ -18,8 +16,6 @@ import torch.nn as nn
 from PIL import Image
 from torchvision import models, transforms
 
-# ── Class taxonomy ─────────────────────────────────────────────────────────────
-# Order MUST match the training notebook — checkpoint output dim indexed by this.
 CLASS_NAMES: List[str] = [
     "RN", "RA", "U", "FB", "T", "D", "SW", "F", "BTN", "CRA",
     "Q", "QA", "IC", "M", "L", "V", "CR", "S", "P", "TP",
@@ -37,12 +33,10 @@ FULL_NAMES: Dict[str, str] = {
     "S": "Sensor", "TP": "Test Point", "V": "Voltage Regulator",
 }
 
-# ── Preprocessing (matches training) ───────────────────────────────────────────
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 WIN_SIZE = 64
 
-# ── Sliding-window params (from notebook) ──────────────────────────────────────
 WORK_SIZES = [256, 384, 576]
 STRIDE = 32
 SCORE_MIN = 0.25
@@ -50,11 +44,11 @@ NMS_IOU = 0.30
 TOP_K_PER_WIN = 3
 MAX_BOXES = 40
 
-# ── YOLO params ────────────────────────────────────────────────────────────────
 YOLO_WEIGHTS = "yolov8_pcb.pt"
 YOLO_CONF = 0.25
 YOLO_IOU = 0.45
 YOLO_MAX_DET = 60
+YOLO_IMGSZ = 640  # downscale input to speed up Render CPU inference
 
 
 @dataclass
@@ -89,8 +83,6 @@ def _iou(a, b):
 
 
 class PCBVisionSystem(nn.Module):
-    """MobileNetV3-Small + sliding-window detection (Method A)."""
-
     def __init__(self, cfg: JEPAConfig = None):
         super().__init__()
         self.cfg = cfg or JEPAConfig()
@@ -144,7 +136,6 @@ class PCBVisionSystem(nn.Module):
         }
 
     def detect_boxes(self, pil_image: Image.Image) -> Dict:
-        """Back-compat alias for the original endpoint."""
         return self.detect_boxes_sliding(pil_image)
 
     def _detect_at_scale(self, img_pil, work_size, orig_w, orig_h, device):
@@ -218,8 +209,6 @@ class PCBVisionSystem(nn.Module):
 
 
 class YOLOHybridDetector:
-    """YOLOv8 box proposer + MobileNetV3 classifier."""
-
     def __init__(self, classifier: PCBVisionSystem, weights_path: str = YOLO_WEIGHTS):
         self.classifier = classifier
         self.weights_path = Path(weights_path)
@@ -249,7 +238,7 @@ class YOLOHybridDetector:
         if not self.weights_path.exists():
             raise FileNotFoundError(
                 f"YOLO weights not found at {self.weights_path}. "
-                f"Train via PCB_YOLO_Detection.ipynb and place yolov8_pcb.pt in the backend folder."
+                f"Train via the YOLO notebook and place yolov8_pcb.pt in the backend folder."
             )
         try:
             from ultralytics import YOLO
@@ -259,7 +248,22 @@ class YOLOHybridDetector:
                 "ultralytics not installed. Add 'ultralytics>=8.0' to requirements.txt."
             ) from e
         self._yolo = YOLO(str(self.weights_path))
+        # Warm up with one dummy inference so the first real request is fast
+        try:
+            dummy = np.zeros((YOLO_IMGSZ, YOLO_IMGSZ, 3), dtype=np.uint8)
+            self._yolo.predict(dummy, imgsz=YOLO_IMGSZ, conf=YOLO_CONF, verbose=False)
+        except Exception as e:
+            print(f"  YOLO warm-up failed (non-fatal): {e}")
         return self._yolo
+
+    def preload(self):
+        """Eagerly load YOLO at startup. Safe to call once before serving traffic."""
+        try:
+            self._ensure_loaded()
+            return True
+        except Exception as e:
+            print(f"  YOLO preload failed: {e}")
+            return False
 
     @torch.no_grad()
     def detect(self, pil_image: Image.Image) -> Dict:
@@ -269,6 +273,7 @@ class YOLOHybridDetector:
         results = yolo.predict(
             np.array(pil_image.convert("RGB")),
             conf=YOLO_CONF, iou=YOLO_IOU, max_det=YOLO_MAX_DET,
+            imgsz=YOLO_IMGSZ,
             verbose=False,
         )[0]
         if len(results.boxes) == 0:
@@ -294,7 +299,6 @@ class YOLOHybridDetector:
             top_idx = int(np.argmax(p))
             cls = self.classifier.class_names[top_idx]
             cls_score = float(p[top_idx])
-            # Combined score = geometric mean of localization + classification
             combined = float(np.sqrt(float(yscore) * cls_score))
             x1f, y1f, x2f, y2f = float(x1), float(y1), float(x2), float(y2)
             out_boxes.append({
@@ -342,8 +346,12 @@ def load_model(checkpoint_path: str = "best.pt",
 
 
 def load_yolo_detector(classifier: PCBVisionSystem,
-                       weights_path: str = YOLO_WEIGHTS) -> YOLOHybridDetector:
-    return YOLOHybridDetector(classifier, weights_path)
+                       weights_path: str = YOLO_WEIGHTS,
+                       eager: bool = False) -> YOLOHybridDetector:
+    detector = YOLOHybridDetector(classifier, weights_path)
+    if eager:
+        detector.preload()
+    return detector
 
 
 def multitask_loss(*args, **kwargs):
