@@ -1,8 +1,9 @@
 """
-flask_server.py — PCBWorkspace SERC backend (with eager YOLO preload)
+flask_server.py — PCBWorkspace SERC backend (with eager YOLO preload + calibration)
 """
 
-import io, time
+import io, time, json, os, threading
+from pathlib import Path
 from flask import Flask, request, jsonify
 
 try:
@@ -23,12 +24,34 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
+try:
+    import cv2
+    import numpy as np
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+
 from pcb_jepa_nn import CLASS_NAMES, load_model, load_yolo_detector
 
 CHECKPOINT_PATH = "best.pt"
 YOLO_WEIGHTS_PATH = "yolov8_pcb.pt"
 MODEL_NAME = "MobileNetV3-Small (multi-label, FPIC, paper mAP 0.636)"
 HYBRID_NAME = "YOLOv8n (box proposer) + MobileNetV3-Small (classifier)"
+
+CALIBRATION_PATH = "calibration.json"
+_calibration_lock = threading.Lock()
+
+
+def _load_saved_calibration():
+    try:
+        with open(CALIBRATION_PATH, "r") as f:
+            return json.load(f).get("homography")
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+_saved_homography = _load_saved_calibration()
+
 
 app = Flask(__name__)
 CORS(app, origins=[
@@ -50,17 +73,15 @@ def _ensure_model():
         if _model_loaded:
             print(f"  Loaded MobileNetV3-Small weights from {CHECKPOINT_PATH}")
         else:
-            print(f"  WARN: {CHECKPOINT_PATH} not found — running with random init")
+            print(f"  WARN: {CHECKPOINT_PATH} not found - running with random init")
 
-        # PRE-LOAD YOLO eagerly so the first /nn/detect_boxes_yolo isn't slow.
-        # Adds ~5s to startup time but cuts first-request latency dramatically.
         _yolo = load_yolo_detector(_model, YOLO_WEIGHTS_PATH, eager=True)
         if _yolo.status.get("loaded"):
             print(f"  Pre-loaded YOLOv8n weights from {YOLO_WEIGHTS_PATH}")
         elif _yolo.weights_path.exists():
             print(f"  YOLO weights present but eager-load failed; will retry on first request")
         else:
-            print(f"  WARN: {YOLO_WEIGHTS_PATH} missing — /nn/detect_boxes_yolo will return unavailable")
+            print(f"  WARN: {YOLO_WEIGHTS_PATH} missing - /nn/detect_boxes_yolo will return unavailable")
     return _model
 
 
@@ -89,11 +110,13 @@ def health():
         "ok": True,
         "torch": TORCH_AVAILABLE,
         "pil": PIL_AVAILABLE,
+        "opencv": CV2_AVAILABLE,
         "model_loaded": _model_loaded,
         "yolo_available": _yolo.available if _yolo else False,
         "yolo_loaded": (_yolo.status.get("loaded", False) if _yolo else False),
         "trained": _model_loaded,
         "device": _device,
+        "calibrated": _saved_homography is not None,
     })
 
 
@@ -230,6 +253,64 @@ def nn_items_state():
     return jsonify({"items": [], "nn_annotations": []})
 
 
+# Calibration endpoints
+@app.route("/calibration/save", methods=["POST"])
+def calibration_save():
+    global _saved_homography
+    if not CV2_AVAILABLE:
+        return jsonify({"error": "OpenCV not installed"}), 503
+
+    data = request.get_json() or {}
+    pixel_pts = data.get("pixel_points")
+    world_pts = data.get("world_points")
+
+    if not pixel_pts or not world_pts or len(pixel_pts) != len(world_pts):
+        return jsonify({"error": "Need matching pixel_points and world_points"}), 400
+    if len(pixel_pts) < 4:
+        return jsonify({"error": "Need at least 4 point pairs"}), 400
+
+    try:
+        src = np.array(pixel_pts, dtype=np.float32)
+        dst = np.array(world_pts, dtype=np.float32)
+        H, _mask = cv2.findHomography(src, dst, method=0)
+        if H is None:
+            return jsonify({"error": "Homography computation failed (collinear points?)"}), 400
+
+        H_list = H.tolist()
+        with _calibration_lock:
+            _saved_homography = H_list
+            try:
+                with open(CALIBRATION_PATH, "w") as f:
+                    json.dump({"homography": H_list, "point_count": len(pixel_pts)}, f)
+            except OSError as e:
+                print(f"  WARN: could not persist calibration to disk: {e}")
+
+        return jsonify({"ok": True, "homography": H_list})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/calibration/get")
+def calibration_get():
+    with _calibration_lock:
+        H = _saved_homography
+    if H is None:
+        return jsonify({"error": "No calibration saved"}), 404
+    return jsonify({"homography": H})
+
+
+@app.route("/calibration/clear", methods=["POST"])
+def calibration_clear():
+    global _saved_homography
+    with _calibration_lock:
+        _saved_homography = None
+        try:
+            os.remove(CALIBRATION_PATH)
+        except (FileNotFoundError, OSError):
+            pass
+    return jsonify({"ok": True})
+
+
 @app.route("/chat", methods=["POST"])
 def chat():
     return jsonify({"reply": "[stub] keep your existing chat route here"})
@@ -240,8 +321,10 @@ if __name__ == "__main__":
     print(" PCBWorkspace Flask Server")
     print(f" PyTorch     : {'YES' if TORCH_AVAILABLE else 'NO'}")
     print(f" Pillow      : {'YES' if PIL_AVAILABLE else 'NO'}")
+    print(f" OpenCV      : {'YES' if CV2_AVAILABLE else 'NO'}")
     print(f" MobileNet   : {'LOADED' if _model_loaded else 'MISSING (random init)'}")
     print(f" YOLO        : {'LOADED' if (_yolo and _yolo.status.get('loaded')) else 'MISSING'}")
+    print(f" Calibration : {'LOADED' if _saved_homography else 'NONE'}")
     print(f" Classes     : {len(CLASS_NAMES)}")
     print(f" Device      : {_device}")
     print(f" URL         : http://127.0.0.1:5000")
