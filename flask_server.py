@@ -318,8 +318,15 @@ def chat():
     if request.method == "OPTIONS":
         return "", 200
     data = request.get_json(silent=True) or {}
-    message = (data.get("message") or "").strip()
-    if not message:
+    history = data.get("messages")
+    if not history:
+        single = (data.get("message") or "").strip()
+        history = [{"role": "user", "content": single}] if single else []
+    clean = [m for m in history
+             if m.get("role") in ("user", "assistant") and (m.get("content") or "").strip()]
+    while clean and clean[0]["role"] != "user":
+        clean.pop(0)
+    if not clean:
         return jsonify({"reply": "What would you like to work on?"})
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -332,7 +339,7 @@ def chat():
             model="claude-sonnet-4-6",
             max_tokens=1024,
             system=CHAT_SYSTEM,
-            messages=[{"role": "user", "content": message}],
+            messages=clean,
         )
         reply = msg.content[0].text.strip()
         return jsonify({"reply": reply})
