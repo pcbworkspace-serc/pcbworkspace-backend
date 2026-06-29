@@ -311,9 +311,33 @@ def calibration_clear():
     return jsonify({"ok": True})
 
 
-@app.route("/chat", methods=["POST"])
+CHAT_SYSTEM = "You are Layla, an expert PCB design and electrical-engineering assistant built into SERC's PCBWorkspace. You help users design circuits, choose components, lay out boards, understand protocols, and plan robot assembly. You are knowledgeable, friendly, and concise. When a user asks what they can do, explain the workspace's capabilities: designing PCBs, placing components, driving the MiniMEE robot arm, and running vision detection. Answer engineering questions directly and practically. Keep replies focused - a few sentences to a few short paragraphs. Use plain language."
+
+@app.route("/chat", methods=["POST", "OPTIONS"])
 def chat():
-    return jsonify({"reply": "[stub] keep your existing chat route here"})
+    if request.method == "OPTIONS":
+        return "", 200
+    data = request.get_json(silent=True) or {}
+    message = (data.get("message") or "").strip()
+    if not message:
+        return jsonify({"reply": "What would you like to work on?"})
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return jsonify({"reply": "(Layla backend missing ANTHROPIC_API_KEY)"}), 500
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            system=CHAT_SYSTEM,
+            messages=[{"role": "user", "content": message}],
+        )
+        reply = msg.content[0].text.strip()
+        return jsonify({"reply": reply})
+    except Exception as e:
+        return jsonify({"reply": "Error: " + str(e)}), 500
 
 
 # VLA plan (Layla natural-language to robot actions)
