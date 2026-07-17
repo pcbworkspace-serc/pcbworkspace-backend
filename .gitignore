@@ -1,4 +1,7 @@
 __pycache__/
 *.pyc
 .env
+data_capture/
+.pytest_cache/
+calibration.json
 

@@ -4,13 +4,18 @@ layout_engine.py — pure-Python circuit/robot-safety logic for PCBWorkspace.
 No Flask, no network, no ML weights — everything here is a plain function
 over plain dicts so it can be unit tested without a server or an API key.
 
-Four pieces:
-  clamp_vla_action   — reject/clamp a single robot action before it reaches
+Five pieces:
+  clamp_vla_action    — reject/clamp a single robot action before it reaches
                         real motors (server-side; do not trust the LLM prompt)
-  run_drc_erc        — connectivity checks over a structured netlist
+  filter_unreachable  — a second, geometric safety net: a target can be
+                        inside the board rectangle and still be outside
+                        what the arm's own kinematics can reach
+  run_drc_erc         — connectivity checks over a structured netlist
                         (floating nets, duplicate refs, pin-count mismatches)
-  auto_place         — simulated-annealing component placement (HPWL cost)
-  auto_route         — grid-based Lee/BFS maze router, one net at a time
+  auto_place          — simulated-annealing component placement (HPWL cost)
+  auto_route          — pin-to-pin Lee/BFS maze router across 1-2 layers,
+                        resolving net crossings with a layer hop where
+                        possible instead of only flagging them
 """
 
 import math
@@ -18,6 +23,55 @@ import random
 
 ALLOWED_ACTIONS = {"home", "move", "rotate", "pick", "place", "release",
                     "scan", "detect", "align", "validate"}
+
+# 2-link planar arm geometry, straight from the Rev 2 hardware doc's arm
+# segment lengths (150mm base->elbow, 180mm elbow->nozzle) — same numbers
+# the reach-simulation artifact uses, so the two stay consistent.
+ARM_L1_MM = 150.0
+ARM_L2_MM = 180.0
+
+# Where the board's own (0,0) sits in the arm's base frame. THIS IS A
+# PLACEHOLDER, not a measurement — nothing in this codebase has calibrated
+# the physical offset between the board origin and the arm base yet. It's
+# set to the same value the reach-sim artifact uses so the two don't
+# silently disagree, but it needs a real number once that calibration
+# exists. Until then this check catches only the clearly-impossible cases
+# (way outside the reach envelope), which is still worth having — it's a
+# safety net layered on top of clamp_vla_action's board-bounds check, not
+# a replacement for real arm-frame calibration.
+ARM_BASE_OFFSET_MM = (190.0, 40.0)
+
+
+def check_reach(board_x, board_y, offset=ARM_BASE_OFFSET_MM, l1=ARM_L1_MM, l2=ARM_L2_MM):
+    """Is (board_x, board_y) inside the 2-link arm's annular reach envelope?
+    Returns (reachable: bool, r: float distance from arm base)."""
+    arm_x = board_x + offset[0]
+    arm_y = board_y + offset[1]
+    r = math.hypot(arm_x, arm_y)
+    min_r, max_r = abs(l1 - l2), l1 + l2
+    return (min_r <= r <= max_r), r
+
+
+def filter_unreachable_actions(actions, offset=ARM_BASE_OFFSET_MM, l1=ARM_L1_MM, l2=ARM_L2_MM):
+    """Second pass after clamp_vla_plan: drop 'move' actions whose (x_mm,
+    y_mm) — while inside the board rectangle — fall outside the arm's own
+    kinematic reach. Returns (filtered_actions, warnings)."""
+    kept, warnings = [], []
+    for action in actions:
+        if action.get("action") != "move":
+            kept.append(action)
+            continue
+        reachable, r = check_reach(action["x_mm"], action["y_mm"], offset=offset, l1=l1, l2=l2)
+        if reachable:
+            kept.append(action)
+        else:
+            min_r, max_r = abs(l1 - l2), l1 + l2
+            warnings.append(
+                "dropped move (%.1f,%.1f) - r=%.1fmm outside arm reach envelope [%.1f,%.1f]mm"
+                " (ARM_BASE_OFFSET_MM is an unmeasured placeholder - verify against real calibration)"
+                % (action["x_mm"], action["y_mm"], r, min_r, max_r)
+            )
+    return kept, warnings
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -168,6 +222,61 @@ def run_drc_erc(circuit):
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# BOM plausibility — a substitute for live Octopart/Digikey sourcing
+# ─────────────────────────────────────────────────────────────────────────
+# There's no sourcing API key available to check that a generated part
+# actually exists and is buyable — that needs a real Octopart/Digikey/
+# Mouser key this environment doesn't have, and shipping an untested
+# integration against a service nothing here can actually call would be
+# worse than not having it. This is the deterministic stand-in: catch the
+# adjacent problem DRC can't — a value that doesn't look like a real part
+# value for its type ("10uF" on a part typed "resistor"), a missing value
+# on a part that needs one, or a footprint code nothing in this codebase
+# recognizes. It won't catch "this exact part number doesn't exist" —
+# only "this value/footprint combination doesn't make physical sense."
+
+import re
+
+_RESISTOR_VALUE_RE = re.compile(r"^\d+(\.\d+)?\s*(m|k|meg|M|R|ohm|ohms|Ω)?$", re.IGNORECASE)
+_CAPACITOR_VALUE_RE = re.compile(r"^\d+(\.\d+)?\s*(p|n|u|µ|m)?F$", re.IGNORECASE)
+_INDUCTOR_VALUE_RE = re.compile(r"^\d+(\.\d+)?\s*(p|n|u|µ|m)?H$", re.IGNORECASE)
+
+_VALUE_CHECKS = {
+    "resistor": (_RESISTOR_VALUE_RE, "a resistance (e.g. '10k', '4.7k', '220', '1M')"),
+    "capacitor": (_CAPACITOR_VALUE_RE, "a capacitance (e.g. '100nF', '10uF', '22pF')"),
+    "inductor": (_INDUCTOR_VALUE_RE, "an inductance (e.g. '10uH', '1mH')"),
+}
+
+
+def check_bom_plausibility(circuit):
+    """Deterministic heuristic checks over value/footprint sanity.
+    Returns {"warnings": [...], "plausible": bool}. Never raises on
+    malformed input - a missing/odd field is itself something to warn
+    about, not a reason to crash the check."""
+    warnings = []
+    known_footprints = set(FOOTPRINT_SIZE_MM.keys())
+
+    for comp in circuit.get("components") or []:
+        ref = comp.get("ref") or "?"
+        ctype = (comp.get("type") or "").strip().lower()
+        value = (comp.get("value") or "").strip()
+        footprint = (comp.get("footprint") or "").strip().lower()
+
+        check = _VALUE_CHECKS.get(ctype)
+        if check is not None:
+            pattern, description = check
+            if not value:
+                warnings.append("%s: %s has no value specified" % (ref, ctype))
+            elif not pattern.match(value):
+                warnings.append("%s: value '%s' doesn't look like %s" % (ref, value, description))
+
+        if footprint and footprint not in known_footprints:
+            warnings.append("%s: footprint '%s' isn't one this codebase recognizes - verify it's a real package before ordering" % (ref, footprint))
+
+    return {"warnings": warnings, "plausible": len(warnings) == 0}
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # Auto-placement — simulated annealing over HPWL + overlap cost
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -185,6 +294,9 @@ def _footprint_size(comp):
 
 
 def _nets_from_components(components):
+    """net -> component refs (not pins) - the granularity auto_place's HPWL
+    cost needs. auto_route uses the pad-level variant below instead, since
+    routing needs to know which pin, not just which component."""
     nets = {}
     for comp in components:
         ref = comp.get("ref")
@@ -192,6 +304,58 @@ def _nets_from_components(components):
             if net:
                 nets.setdefault(str(net), set()).add(ref)
     return {n: sorted(refs) for n, refs in nets.items() if len(refs) >= 2}
+
+
+def _edge_positions(count, span):
+    """`count` evenly-spaced offsets along [-span/2, span/2] (0 -> [], 1 -> [0])."""
+    if count <= 0:
+        return []
+    if count == 1:
+        return [0.0]
+    step = span / (count - 1)
+    return [-span / 2 + i * step for i in range(count)]
+
+
+def _pad_offsets(pin_numbers, w, h):
+    """(dx, dy) per pin relative to the component's own center — a
+    heuristic footprint layout, not a datasheet-exact one: 2-pin parts get
+    end-to-end pads, 3-pin parts get a SOT-23-style 2-bottom/1-top layout,
+    anything bigger gets a generic dual-row IC layout (left edge top-to-
+    bottom, right edge bottom-to-top, matching standard IC pin numbering).
+    This only affects routing *geometry* — pin-to-net connectivity (what
+    DRC/ERC checks) doesn't depend on where a pad is drawn.
+    """
+    pins_sorted = sorted(pin_numbers, key=lambda p: (len(str(p)), str(p)))
+    n = len(pins_sorted)
+    offsets = {}
+
+    if n == 2:
+        offsets[pins_sorted[0]] = (-w / 2 * 0.7, 0.0)
+        offsets[pins_sorted[1]] = (w / 2 * 0.7, 0.0)
+    elif n == 3:
+        offsets[pins_sorted[0]] = (-w / 2 * 0.6, -h / 2 * 0.8)
+        offsets[pins_sorted[1]] = (w / 2 * 0.6, -h / 2 * 0.8)
+        offsets[pins_sorted[2]] = (0.0, h / 2 * 0.8)
+    else:
+        half = (n + 1) // 2
+        left, right = pins_sorted[:half], pins_sorted[half:]
+        for p, y in zip(left, _edge_positions(len(left), h * 0.8)):
+            offsets[p] = (-w / 2 * 0.85, y)
+        for p, y in zip(reversed(right), _edge_positions(len(right), h * 0.8)):
+            offsets[p] = (w / 2 * 0.85, y)
+
+    return offsets
+
+
+def _pad_nets_from_components(components):
+    """net -> [(ref, pin_no), ...], pad-level (not component-level)."""
+    nets = {}
+    for comp in components:
+        ref = comp.get("ref")
+        for pin_no, net in (comp.get("pins") or {}).items():
+            if net:
+                nets.setdefault(str(net), []).append((ref, str(pin_no)))
+    return {n: members for n, members in nets.items() if len(members) >= 2}
 
 
 def _hpwl_cost(positions, nets):
@@ -324,75 +488,117 @@ def _bfs_route(grid_w, grid_h, blocked, start, goal):
     return None
 
 
-def auto_route(positions, components, board_w, board_h, grid_mm=1.0, keepout_mm=1.0):
+def auto_route(positions, components, board_w, board_h, grid_mm=1.0, keepout_mm=1.0, layers=2):
     """Route every multi-pin net as an MST of point-to-point BFS paths on a
-    Manhattan grid. Obstacles are component keepout footprints only — this
-    is a single-pass v1 router: it does NOT prevent one net's trace from
-    crossing another's (that needs a real via/layer model), it just flags
-    crossings so a human can add a via or move to layer 2.
+    Manhattan grid, pin-to-pin (not centroid-to-centroid — see
+    _pad_offsets). Obstacles are component keepouts, always respected.
+
+    Net-to-net crossings are resolved across `layers` routing layers where
+    possible: each edge tries layer 1 first, then layer 2, before falling
+    back to routing through the conflict anyway (v1's behavior) as a last
+    resort so a genuinely congested board still produces a route instead
+    of silently failing. Vias are assumed at both ends of any segment that
+    lands on layer 2 — this doesn't optimize via placement or do rip-up-
+    and-reroute, it's a real improvement over "always flag, never resolve"
+    but still not a substitute for a real autorouter before fab.
     """
     grid_w = max(1, int(math.ceil(board_w / grid_mm)))
     grid_h = max(1, int(math.ceil(board_h / grid_mm)))
+    layers = max(1, int(layers))
 
     def to_cell(x, y):
         return (int(round(x / grid_mm)), int(round(y / grid_mm)))
 
     sizes = {c["ref"]: _footprint_size(c) for c in components if c.get("ref")}
     keepout_by_ref = {}
-    pin_cells = {}
     for ref, (x, y) in positions.items():
-        pin_cells[ref] = to_cell(x, y)
         w, h = sizes.get(ref, DEFAULT_SIZE_MM)
         kx = int(math.ceil((w / 2 + keepout_mm) / grid_mm))
         ky = int(math.ceil((h / 2 + keepout_mm) / grid_mm))
-        cx, cy = pin_cells[ref]
+        cx, cy = to_cell(x, y)
         keepout_by_ref[ref] = {(gx, gy) for gx in range(cx - kx, cx + kx + 1)
                                          for gy in range(cy - ky, cy + ky + 1)}
-    blocked = set().union(*keepout_by_ref.values()) if keepout_by_ref else set()
+    hard_blocked_all = set().union(*keepout_by_ref.values()) if keepout_by_ref else set()
 
-    nets = _nets_from_components(components)
-    routed, unrouted = [], []
-    all_used_cells = {}  # cell -> net name, for crossing detection
+    # pad-level pin positions: component center + a heuristic per-pin offset
+    pad_positions, pad_cells = {}, {}
+    for comp in components:
+        ref = comp.get("ref")
+        if ref not in positions:
+            continue
+        cx, cy = positions[ref]
+        w, h = sizes.get(ref, DEFAULT_SIZE_MM)
+        pins = comp.get("pins") or {}
+        offsets = _pad_offsets(list(pins.keys()), w, h)
+        for pin_no in pins:
+            dx, dy = offsets.get(str(pin_no), (0.0, 0.0))
+            pad_positions[(ref, str(pin_no))] = (cx + dx, cy + dy)
+            pad_cells[(ref, str(pin_no))] = to_cell(cx + dx, cy + dy)
 
-    for net, refs in nets.items():
-        edges = _mst_edges(refs, positions)
+    pad_nets = _pad_nets_from_components(components)
+    net_order = sorted(pad_nets.keys(), key=lambda n: (-len(pad_nets[n]), n))  # bigger nets first, then deterministic
+
+    used_by_layer = {layer: {} for layer in range(1, layers + 1)}  # layer -> {cell: net}
+    routed, unrouted, crossings = [], [], []
+
+    for net in net_order:
+        members = pad_nets[net]
+        edges = _mst_edges(members, pad_positions)
         net_paths = []
-        ok = True
+        net_ok = True
+
         for a, b in edges:
-            start, goal = pin_cells[a], pin_cells[b]
-            # a wire has to be able to leave its own component's keepout, and
-            # arrive inside the target's — only those two are excluded here,
-            # every other component (including others on this same net) still
-            # blocks, so the route has to go around them
-            local_blocked = blocked - keepout_by_ref.get(a, set()) - keepout_by_ref.get(b, set())
-            path = _bfs_route(grid_w, grid_h, local_blocked, start, goal)
+            ref_a, ref_b = a[0], b[0]
+            start, goal = pad_cells[a], pad_cells[b]
+            hard_blocked = hard_blocked_all - keepout_by_ref.get(ref_a, set()) - keepout_by_ref.get(ref_b, set())
+
+            path, chosen_layer, via_fallback = None, None, False
+            for layer in range(1, layers + 1):
+                soft_blocked = {cell for cell, n in used_by_layer[layer].items() if n != net}
+                path = _bfs_route(grid_w, grid_h, hard_blocked | soft_blocked, start, goal)
+                if path is not None:
+                    chosen_layer = layer
+                    break
+
             if path is None:
-                ok = False
+                # every layer is congested here - route anyway on layer 1,
+                # ignoring other nets, and flag the conflict below
+                path = _bfs_route(grid_w, grid_h, hard_blocked, start, goal)
+                chosen_layer = 1
+                via_fallback = True
+
+            if path is None:
+                net_ok = False  # geometrically impossible even ignoring other nets
                 continue
-            net_paths.append({"from": a, "to": b, "cells": path,
-                               "mm": [[round(gx * grid_mm, 2), round(gy * grid_mm, 2)] for gx, gy in path]})
+
             for cell in path:
-                if cell in all_used_cells and all_used_cells[cell] != net:
-                    pass  # crossing — surfaced below via crossings list
-                all_used_cells.setdefault(cell, net)
-        if ok and net_paths:
+                prior = used_by_layer[chosen_layer].get(cell)
+                if prior is not None and prior != net:
+                    crossings.append({
+                        "cell_mm": [round(cell[0] * grid_mm, 2), round(cell[1] * grid_mm, 2)],
+                        "layer": chosen_layer, "nets": sorted([prior, net]),
+                    })
+                used_by_layer[chosen_layer][cell] = net
+
+            net_paths.append({
+                "from": "%s.%s" % a, "to": "%s.%s" % b, "layer": chosen_layer,
+                "via_fallback": via_fallback, "cells": path,
+                "mm": [[round(gx * grid_mm, 2), round(gy * grid_mm, 2)] for gx, gy in path],
+            })
+
+        if net_ok and net_paths:
             routed.append({"net": net, "segments": net_paths})
         else:
             unrouted.append(net)
-
-    # crossing detection: any cell touched by >1 distinct net
-    cell_nets = {}
-    for entry in routed:
-        for seg in entry["segments"]:
-            for cell in seg["cells"]:
-                cell_nets.setdefault(cell, set()).add(entry["net"])
-    crossings = [{"cell_mm": [round(c[0] * grid_mm, 2), round(c[1] * grid_mm, 2)], "nets": sorted(n)}
-                 for c, n in cell_nets.items() if len(n) > 1]
 
     return {
         "routed_nets": routed,
         "unrouted_nets": unrouted,
         "crossings_needing_via": crossings,
+        "layers_used": layers,
         "grid_mm": grid_mm,
-        "layer_note": "v1 heuristic single-pass router - crossings need a via/layer-2 jump, not yet DRC-clearance verified for fab",
+        "layer_note": ("v2: routes pin-to-pin across %d layer(s), resolving net crossings with a layer hop where "
+                        "possible. crossings_needing_via now lists only conflicts that couldn't be resolved even "
+                        "across all layers, plus via_fallback segments — still not DRC-clearance verified for fab."
+                        % layers),
     }

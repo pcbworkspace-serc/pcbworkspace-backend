@@ -33,8 +33,13 @@ except ImportError:
 
 from pcb_jepa_nn import CLASS_NAMES, load_model, load_yolo_detector
 import layout_engine
+import kicad_export
 import vision_classical
 import jepa_heads
+import data_capture
+
+CAPTURE_TRAINING_DATA = os.environ.get("CAPTURE_TRAINING_DATA", "").lower() in ("1", "true", "yes")
+CAPTURE_DIR = os.environ.get("CAPTURE_DIR", data_capture.DEFAULT_CAPTURE_DIR)
 
 CHECKPOINT_PATH = "best.pt"
 YOLO_WEIGHTS_PATH = "yolov8_pcb.pt"
@@ -128,6 +133,53 @@ CORS(app, origins=[
     "http://localhost:8080",
     "http://localhost:5173",
 ])
+
+# Basic request logging — one line per request to stdout, which Render
+# (and any platform running `python flask_server.py` under a process
+# manager) captures as logs automatically. No new dependency, no file
+# handling to get wrong on a read-only filesystem.
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+_request_logger = logging.getLogger("pcbworkspace.request")
+
+
+@app.before_request
+def _log_request_start():
+    request._t0 = time.perf_counter()
+
+
+@app.after_request
+def _log_request_end(response):
+    duration_ms = round((time.perf_counter() - getattr(request, "_t0", time.perf_counter())) * 1000, 1)
+    _request_logger.info(
+        "%s %s -> %d (%sms)%s",
+        request.method, request.path, response.status_code, duration_ms,
+        " key=missing" if response.status_code == 401 else "",
+    )
+    return response
+
+# API key auth — OFF by default (BACKEND_API_KEY unset) so this doesn't
+# break the deployed frontend the moment it ships; every route below is
+# reachable with no auth today. Set BACKEND_API_KEY on Render to turn it
+# on, and update the frontend to send it as X-API-Key on every request
+# first — flipping this on without that change locks your own site out.
+import functools
+
+def require_api_key(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        configured_key = os.environ.get("BACKEND_API_KEY")
+        if not configured_key:
+            return fn(*args, **kwargs)  # auth disabled - not configured
+        if request.method == "OPTIONS":
+            return fn(*args, **kwargs)  # let CORS preflight through unauthenticated
+        sent_key = request.headers.get("X-API-Key", "")
+        if sent_key != configured_key:
+            return jsonify({"error": "missing or invalid X-API-Key header"}), 401
+        return fn(*args, **kwargs)
+    return wrapper
+
 
 _model = None
 _model_loaded = False
@@ -270,15 +322,27 @@ def nn_status():
             },
         },
         "schematic_and_layout": {
-            "generate": {"endpoint": "/schematic/generate", "description": "NL description -> structured netlist JSON + DRC/ERC (layout_engine.run_drc_erc)"},
+            "generate": {"endpoint": "/schematic/generate", "description": "NL description -> structured netlist JSON + DRC/ERC + BOM plausibility check"},
             "drc": {"endpoint": "/schematic/drc", "description": "Run DRC/ERC on an existing circuit JSON without calling Claude again"},
+            "bom_check": {"endpoint": "/schematic/bom_check", "description": "Deterministic value/footprint sanity check - stand-in for live Octopart/Digikey sourcing (no API key available for that)"},
+            "export_kicad": {"endpoint": "/schematic/export/kicad", "description": "Circuit JSON -> KiCad legacy netlist file, importable via pcbnew's Read Netlist"},
             "place": {"endpoint": "/layout/place", "description": "Simulated-annealing auto-placement (HPWL + overlap cost)"},
-            "route": {"endpoint": "/layout/route", "description": "Grid-based Lee/BFS maze auto-router, v1 heuristic — see layer_note in response"},
+            "route": {"endpoint": "/layout/route", "description": "Pin-to-pin Lee/BFS auto-router across 1-2 layers, resolving crossings with a layer hop where possible - see layer_note in response"},
+        },
+        "robot_safety": {
+            "board_bounds_clamp": {"description": "clamp_vla_action - drops/clamps out-of-range or malformed robot actions"},
+            "kinematic_reach_check": {"description": "filter_unreachable_actions - drops in-bounds-but-unreachable targets (ARM_BASE_OFFSET_MM is an unmeasured placeholder, see layout_engine.py)"},
+        },
+        "data_capture": {
+            "enabled": CAPTURE_TRAINING_DATA,
+            "feedback_endpoint": "/nn/feedback",
+            "stats_endpoint": "/nn/capture_stats",
         },
     })
 
 
 @app.route("/nn/detect", methods=["POST"])
+@require_api_key
 def nn_detect():
     t0 = time.perf_counter()
     model = _ensure_model()
@@ -302,6 +366,7 @@ def nn_detect():
 
 @app.route("/nn/detect_boxes", methods=["POST"])
 @app.route("/nn/detect_boxes_sliding", methods=["POST"])
+@require_api_key
 def nn_detect_boxes():
     t0 = time.perf_counter()
     model = _ensure_model()
@@ -317,6 +382,7 @@ def nn_detect_boxes():
 
 
 @app.route("/nn/detect_boxes_yolo", methods=["POST"])
+@require_api_key
 def nn_detect_boxes_yolo():
     t0 = time.perf_counter()
     model = _ensure_model()
@@ -372,6 +438,7 @@ def _run_trained_align(img, align_cnn, align_head, px_per_mm):
 
 
 @app.route("/nn/align", methods=["POST"])
+@require_api_key
 def nn_align():
     t0 = time.perf_counter()
     img = _request_to_pil()
@@ -394,10 +461,13 @@ def nn_align():
         result = vision_classical.estimate_alignment(img, px_per_mm=px_per_mm)
 
     result["inference_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+    if CAPTURE_TRAINING_DATA:
+        result["capture_id"] = data_capture.save_capture("align", img, result, base_dir=CAPTURE_DIR)
     return jsonify(result)
 
 
 @app.route("/nn/validate", methods=["POST"])
+@require_api_key
 def nn_validate():
     t0 = time.perf_counter()
     img = _request_to_pil()
@@ -441,10 +511,42 @@ def nn_validate():
             result = vision_classical.validate_placement(img)
 
     result["inference_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+    if CAPTURE_TRAINING_DATA:
+        result["capture_id"] = data_capture.save_capture("validate", img, result, base_dir=CAPTURE_DIR)
     return jsonify(result)
 
 
+@app.route("/nn/feedback", methods=["POST"])
+@require_api_key
+def nn_feedback():
+    """Attaches a real-world outcome to a capture saved by /nn/align or
+    /nn/validate (when CAPTURE_TRAINING_DATA is on). This is the second
+    half of the data-collection loop: the model's own prediction isn't
+    training data, but prediction + a later-confirmed ground truth is —
+    see data_capture.py."""
+    data = request.get_json(silent=True) or {}
+    kind = data.get("kind")
+    capture_id = data.get("capture_id")
+    ground_truth = data.get("ground_truth")
+    if kind not in ("align", "validate") or not capture_id or ground_truth is None:
+        return jsonify({"ok": False, "error": "kind ('align'|'validate'), capture_id, and ground_truth are required"}), 400
+
+    updated = data_capture.record_feedback(kind, capture_id, ground_truth, base_dir=CAPTURE_DIR)
+    if updated is None:
+        return jsonify({"ok": False, "error": "no capture found for that kind/capture_id"}), 404
+    return jsonify({"ok": True, "capture": updated})
+
+
+@app.route("/nn/capture_stats")
+def nn_capture_stats():
+    return jsonify({
+        "capture_enabled": CAPTURE_TRAINING_DATA,
+        "stats": data_capture.capture_stats(base_dir=CAPTURE_DIR),
+    })
+
+
 @app.route("/nn/items", methods=["POST"])
+@require_api_key
 def nn_items():
     return jsonify({"ok": True})
 
@@ -456,6 +558,7 @@ def nn_items_state():
 
 # Calibration endpoints
 @app.route("/calibration/save", methods=["POST"])
+@require_api_key
 def calibration_save():
     global _saved_homography, _saved_board_size
     if not CV2_AVAILABLE:
@@ -517,6 +620,7 @@ def calibration_get():
 
 
 @app.route("/calibration/clear", methods=["POST"])
+@require_api_key
 def calibration_clear():
     global _saved_homography, _saved_board_size
     with _calibration_lock:
@@ -532,6 +636,7 @@ def calibration_clear():
 CHAT_SYSTEM = "You are Layla, an expert PCB design and electrical-engineering assistant built into SERC's PCBWorkspace. You help users design circuits, choose components, lay out boards, understand protocols, and plan robot assembly. You are knowledgeable, friendly, and concise. When a user asks what they can do, explain the workspace's capabilities: designing PCBs, placing components, driving the MiniMEE robot arm, and running vision detection. Answer engineering questions directly and practically. Keep replies focused - a few sentences to a few short paragraphs. Use plain language."
 
 @app.route("/chat", methods=["POST", "OPTIONS"])
+@require_api_key
 def chat():
     if request.method == "OPTIONS":
         return "", 200
@@ -595,6 +700,7 @@ server-side against the same board bounds before anything reaches a motor —
 stay inside them, but this is a safety net, not a substitute for it."""
 
 @app.route("/vla/plan", methods=["POST", "OPTIONS"])
+@require_api_key
 def vla_plan():
     if request.method == "OPTIONS":
         return "", 200
@@ -623,6 +729,10 @@ def vla_plan():
         clean_actions, clamp_warnings = layout_engine.clamp_vla_plan(
             raw_actions, board_w, board_h, z_max=VLA_Z_MAX_MM,
         )
+        # second safety net: a target can be inside the board rectangle and
+        # still be outside what the arm's own 2-link kinematics can reach
+        clean_actions, reach_warnings = layout_engine.filter_unreachable_actions(clean_actions)
+        clamp_warnings = clamp_warnings + reach_warnings
 
         return jsonify({
             "ok": True,
@@ -681,6 +791,7 @@ Rules:
 
 
 @app.route("/schematic/generate", methods=["POST", "OPTIONS"])
+@require_api_key
 def schematic_generate():
     if request.method == "OPTIONS":
         return "", 200
@@ -696,11 +807,13 @@ def schematic_generate():
         result = _extract_json_block(raw)
         circuit = result.get("circuit", {})
         drc = layout_engine.run_drc_erc(circuit)
+        bom_check = layout_engine.check_bom_plausibility(circuit)
         return jsonify({
             "ok": True,
             "interpretation": result.get("interpretation", description),
             "circuit": circuit,
             "drc": drc,
+            "bom_check": bom_check,
         })
     except json.JSONDecodeError as e:
         return jsonify({"ok": False, "error": "Could not parse Claude response: " + str(e)}), 500
@@ -711,6 +824,7 @@ def schematic_generate():
 
 
 @app.route("/schematic/drc", methods=["POST"])
+@require_api_key
 def schematic_drc():
     """Run DRC/ERC on a circuit the frontend already has (e.g. after a user
     hand-edits a generated netlist), without calling Claude again."""
@@ -721,9 +835,41 @@ def schematic_drc():
     return jsonify({"ok": True, "drc": layout_engine.run_drc_erc(circuit)})
 
 
+@app.route("/schematic/bom_check", methods=["POST"])
+@require_api_key
+def schematic_bom_check():
+    """Deterministic value/footprint sanity check — a stand-in for live
+    Octopart/Digikey sourcing (no API key available for that here). See
+    layout_engine.check_bom_plausibility's docstring."""
+    data = request.get_json(silent=True) or {}
+    circuit = data.get("circuit")
+    if not circuit:
+        return jsonify({"ok": False, "error": "circuit is required"}), 400
+    return jsonify({"ok": True, "bom_check": layout_engine.check_bom_plausibility(circuit)})
+
+
+@app.route("/schematic/export/kicad", methods=["POST"])
+@require_api_key
+def schematic_export_kicad():
+    """circuit -> KiCad legacy netlist file (importable via pcbnew's "Read
+    Netlist"). This has not been round-tripped through a real KiCad
+    install in this environment - see kicad_export.py's docstring."""
+    data = request.get_json(silent=True) or {}
+    circuit = data.get("circuit")
+    if not circuit:
+        return jsonify({"ok": False, "error": "circuit is required"}), 400
+    netlist_text = kicad_export.to_kicad_netlist(circuit)
+    from flask import Response
+    return Response(
+        netlist_text, mimetype="text/plain",
+        headers={"Content-Disposition": "attachment; filename=layla_export.net"},
+    )
+
+
 # Auto-placement / auto-routing
 # ---------------------------------------------------------------------------
 @app.route("/layout/place", methods=["POST"])
+@require_api_key
 def layout_place():
     data = request.get_json(silent=True) or {}
     components = data.get("components")
@@ -744,6 +890,7 @@ def layout_place():
 
 
 @app.route("/layout/route", methods=["POST"])
+@require_api_key
 def layout_route():
     data = request.get_json(silent=True) or {}
     components = data.get("components")
@@ -754,6 +901,7 @@ def layout_route():
     board_w = float(data.get("board_w_mm") or default_w)
     board_h = float(data.get("board_h_mm") or default_h)
     grid_mm = float(data.get("grid_mm") or 1.0)
+    layers = int(data.get("layers") or 2)
 
     positions = data.get("positions")
     placement_info = None
@@ -764,7 +912,7 @@ def layout_route():
                                                     seed=data.get("seed"))
         positions = placement_info["positions"]
 
-    result = layout_engine.auto_route(positions, components, board_w, board_h, grid_mm=grid_mm)
+    result = layout_engine.auto_route(positions, components, board_w, board_h, grid_mm=grid_mm, layers=layers)
     result["ok"] = True
     result["board_size_mm"] = {"w_mm": board_w, "h_mm": board_h}
     result["positions_used"] = positions
