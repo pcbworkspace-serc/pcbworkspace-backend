@@ -633,6 +633,53 @@ def calibration_clear():
     return jsonify({"ok": True})
 
 
+# ── Guest chat limiting ────────────────────────────────────────────────────
+# A signed token carries its own usage count, so we need no database and it
+# survives a Render restart. The token is HMAC-signed with GUEST_TOKEN_SECRET
+# (falls back to ANTHROPIC_API_KEY so it's never unsigned in practice). A
+# request that already carries a valid X-API-Key is a real user and skips
+# this entirely.
+import hmac, hashlib, base64
+
+GUEST_CHAT_LIMIT = int(os.environ.get("GUEST_CHAT_LIMIT", "3"))
+_GUEST_SECRET = (os.environ.get("GUEST_TOKEN_SECRET")
+                 or os.environ.get("ANTHROPIC_API_KEY", "")
+                 or "serc-guest-fallback-secret").encode("utf-8")
+
+
+def _guest_sign(count):
+    body = str(int(count)).encode("utf-8")
+    sig = hmac.new(_GUEST_SECRET, body, hashlib.sha256).digest()[:16]
+    token = base64.urlsafe_b64encode(body + b"." + sig).decode("ascii")
+    return token
+
+
+def _guest_count_from_token(token):
+    """Returns the validated count carried by a guest token, or 0 if the
+    token is missing/tampered/malformed (fail closed to a fresh guest)."""
+    if not token:
+        return 0
+    try:
+        rawpad = token + "=" * (-len(token) % 4)
+        raw = base64.urlsafe_b64decode(rawpad.encode("ascii"))
+        body, sig = raw.split(b".", 1)
+        expected = hmac.new(_GUEST_SECRET, body, hashlib.sha256).digest()[:16]
+        if not hmac.compare_digest(sig, expected):
+            return 0
+        return int(body.decode("utf-8"))
+    except Exception:
+        return 0
+
+
+def _is_real_user():
+    """True when a valid API key is present (auth is configured AND matches).
+    Such requests bypass the guest limit."""
+    configured_key = os.environ.get("BACKEND_API_KEY")
+    if not configured_key:
+        return False
+    return request.headers.get("X-API-Key", "") == configured_key
+
+
 CHAT_SYSTEM = "You are Layla, an expert PCB design and electrical-engineering assistant built into SERC's PCBWorkspace. You help users design circuits, choose components, lay out boards, understand protocols, and plan robot assembly. You are knowledgeable, friendly, and concise. When a user asks what they can do, explain the workspace's capabilities: designing PCBs, placing components, driving the MiniMEE robot arm, and running vision detection. Answer engineering questions directly and practically. Keep replies focused - a few sentences to a few short paragraphs. Use plain language."
 
 @app.route("/chat", methods=["POST", "OPTIONS"])
@@ -652,9 +699,35 @@ def chat():
     if not clean:
         return jsonify({"reply": "What would you like to work on?"})
 
+    # ── Guest limit ─────────────────────────────────────────────────────
+    # Real users (valid X-API-Key) are unlimited. Guests get GUEST_CHAT_LIMIT
+    # messages, tracked via a signed token echoed back on each reply.
+    real_user = _is_real_user()
+    guest_used = 0
+    if not real_user:
+        token = request.headers.get("X-Guest-Token", "") or data.get("guest_token", "")
+        guest_used = _guest_count_from_token(token)
+        if guest_used >= GUEST_CHAT_LIMIT:
+            return jsonify({
+                "reply": ("You've used your " + str(GUEST_CHAT_LIMIT) +
+                          " free Layla messages. Sign up for a free account to keep going — "
+                          "you'll get the full PCB Workspace with unlimited chats, the robot "
+                          "control layer, and vision tools."),
+                "limit_reached": True,
+                "guest_used": guest_used,
+                "guest_limit": GUEST_CHAT_LIMIT,
+            }), 200
+
     try:
         reply = _claude_complete(CHAT_SYSTEM, clean, max_tokens=1024)
-        return jsonify({"reply": reply})
+        resp = {"reply": reply}
+        if not real_user:
+            new_count = guest_used + 1
+            resp["guest_token"] = _guest_sign(new_count)
+            resp["guest_used"] = new_count
+            resp["guest_limit"] = GUEST_CHAT_LIMIT
+            resp["guest_remaining"] = max(0, GUEST_CHAT_LIMIT - new_count)
+        return jsonify(resp)
     except RuntimeError as e:
         return jsonify({"reply": "(Layla backend missing ANTHROPIC_API_KEY)"}), 500
     except Exception as e:
