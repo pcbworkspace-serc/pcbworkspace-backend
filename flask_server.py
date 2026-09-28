@@ -680,18 +680,7 @@ def _is_real_user():
     return request.headers.get("X-API-Key", "") == configured_key
 
 
-CHAT_SYSTEM = """You are Layla, SERC's PCBWorkspace assistant. Use the provided
-conversation history to answer the user's actual follow-up. Help with PCB
-design, electronics, and the MiniMEE arm using clear, concise explanations.
-The physical arm has not been assembled. The current SCARA CAD is a manual
-reach mockup; motor interfaces, supported joints, Z axis, nozzle, wiring,
-calibration, and physical motion remain to be verified. The Flask-to-serial
-contract has been tested with simulation and a pseudo terminal only.
-Never claim this conversation executed a robot action or observed a camera.
-Chat returns text, not motor commands. Explain the separate demo and hardware
-paths when asked. Do not invent motor specifications, board/feeder coordinates,
-measurements, or achieved placement accuracy. Ask for a missing dimension or
-part number when it changes the recommendation."""
+CHAT_SYSTEM = "You are Layla, an expert PCB design and electrical-engineering assistant built into SERC's PCBWorkspace. You help users design circuits, choose components, lay out boards, understand protocols, and plan robot assembly. You are knowledgeable, friendly, and concise. When a user asks what they can do, explain the workspace's capabilities: designing PCBs, placing components, driving the MiniMEE robot arm, and running vision detection. Answer engineering questions directly and practically. Keep replies focused - a few sentences to a few short paragraphs. Use plain language."
 
 @app.route("/chat", methods=["POST", "OPTIONS"])
 @require_api_key
@@ -700,20 +689,13 @@ def chat():
         return "", 200
     data = request.get_json(silent=True) or {}
     history = data.get("messages")
-    if history is None:
-        single = data.get("message") or ""
-        history = [{"role": "user", "content": single}] if isinstance(single, str) and single.strip() else []
-    if not isinstance(history, list) or len(history) > 32 or any(
-        not isinstance(m, dict) or m.get("role") not in ("user", "assistant")
-        or not isinstance(m.get("content"), str)
-        or not m["content"].strip() or len(m["content"]) > 4000 for m in history
-    ):
-        return jsonify({"error": "invalid chat history"}), 400
-    clean = [{"role": m["role"], "content": m["content"].strip()} for m in history[-16:]]
+    if not history:
+        single = (data.get("message") or "").strip()
+        history = [{"role": "user", "content": single}] if single else []
+    clean = [m for m in history
+             if m.get("role") in ("user", "assistant") and (m.get("content") or "").strip()]
     while clean and clean[0]["role"] != "user":
         clean.pop(0)
-    if clean and clean[-1]["role"] != "user":
-        return jsonify({"error": "chat history must end with a user turn"}), 400
     if not clean:
         return jsonify({"reply": "What would you like to work on?"})
 
@@ -746,28 +728,33 @@ def chat():
             resp["guest_limit"] = GUEST_CHAT_LIMIT
             resp["guest_remaining"] = max(0, GUEST_CHAT_LIMIT - new_count)
         return jsonify(resp)
-    except RuntimeError:
-        return jsonify({"error": "Layla chat is unavailable on the server"}), 503
-    except Exception:
-        app.logger.exception("Layla chat request failed")
-        return jsonify({"error": "Layla chat is temporarily unavailable"}), 502
+    except RuntimeError as e:
+        return jsonify({"reply": "(Layla backend missing ANTHROPIC_API_KEY)"}), 500
+    except Exception as e:
+        return jsonify({"reply": "Error: " + str(e)}), 500
 
 
 # VLA plan (Layla natural-language to robot actions)
 VLA_Z_MAX_MM = 20.0
 
 def _vla_system_prompt(board_w, board_h):
+    cx, cy = round(board_w / 2, 1), round(board_h / 2, 1)
     return f"""You are Layla, a robot arm controller for a PCB assembly robot (MiniMEE by SERC).
 Convert natural language instructions into a sequence of robot actions.
 
-Board: {board_w:g} x {board_h:g} mm. Origin (0,0) is bottom-left. These are
-historical default bounds unless calibration has set the board dimensions.
+Board: {board_w:g} x {board_h:g} mm. Origin (0,0) is bottom-left. Center is ({cx}, {cy}) mm.
 
 Respond ONLY with valid JSON - no markdown, no explanation, just raw JSON:
 {{
   "interpretation": "one-line description of what you will do",
-  "actions": [],
-  "warnings": ["Need explicit coordinates and calibrated hardware before motion"]
+  "actions": [
+    {{"action": "home"}},
+    {{"action": "move", "x_mm": {cx}, "y_mm": {cy}, "z_mm": 5}},
+    {{"action": "pick"}},
+    {{"action": "move", "x_mm": {cx}, "y_mm": {cy}, "z_mm": 0}},
+    {{"action": "place"}}
+  ],
+  "warnings": []
 }}
 
 Valid action types:
@@ -776,13 +763,14 @@ Valid action types:
   home | pick | place | release | scan | detect | align | validate - no extra fields
 
 Rules:
-- Do not infer feeder positions, parts, calibration, or safe Z heights.
-- If pickup/placement details are missing, return an empty actions array and
-  explain what is needed in warnings.
-- If the instruction is a question, return an empty actions array.
-- Keep x_mm within 0-{board_w:g}, y_mm within 0-{board_h:g}.
+- z_mm = 5 for transit moves, z_mm = 0 for pick/place
+- Always HOME first unless told not to
+- If the instruction has no robot motion intent, return an empty actions array
+- Keep x_mm within 0-{board_w:g}, y_mm within 0-{board_h:g}
 
-These are preview plans, not proof of reach, calibration, or physical action."""
+Note: whatever coordinates you return here are re-validated and clamped
+server-side against the same board bounds before anything reaches a motor —
+stay inside them, but this is a safety net, not a substitute for it."""
 
 @app.route("/vla/plan", methods=["POST", "OPTIONS"])
 @require_api_key
@@ -790,21 +778,12 @@ def vla_plan():
     if request.method == "OPTIONS":
         return "", 200
 
-    if request.is_json:
-        payload = request.get_json(silent=True) or {}
-        instruction = payload.get("instruction", "")
-        board_state = payload.get("board_state", [])
-    else:
-        instruction = request.form.get("instruction", "")
-        try:
-            board_state = json.loads(request.form.get("board_state", "[]"))
-        except (ValueError, TypeError):
-            return jsonify({"ok": False, "error": "invalid board_state JSON"}), 400
-    if not isinstance(instruction, str) or not instruction.strip() or len(instruction) > 2000:
-        return jsonify({"ok": False, "error": "instruction required (max 2000 characters)"}), 400
-    instruction = instruction.strip()
-    if not isinstance(board_state, list):
-        return jsonify({"ok": False, "error": "board_state must be an array"}), 400
+    instruction = request.form.get("instruction", "").strip()
+    board_state_raw = request.form.get("board_state", "[]")
+    try:
+        board_state = json.loads(board_state_raw)
+    except Exception:
+        board_state = []
 
     board_w, board_h = _get_board_bounds()
 
