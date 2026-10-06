@@ -181,6 +181,11 @@ def require_api_key(fn):
     return wrapper
 
 
+# Independent simulation blueprint: no controller, serial, or model calls.
+from routes_exchange import create_exchange_blueprint
+app.register_blueprint(create_exchange_blueprint(require_api_key))
+
+
 _model = None
 _model_loaded = False
 _yolo = None
