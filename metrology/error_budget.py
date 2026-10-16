@@ -84,6 +84,21 @@ def set_value(raw, dotted, value, source=None):
         node[leaf] = {"value": value, "source": source or "set on the command line"}
 
 
+def dump_config(node, indent=0):
+    """JSON text for budget_config.json, one {"value", "source"} leaf per line."""
+    pad = "  " * indent
+    if _is_leaf(node) or not isinstance(node, (dict, list)):
+        return json.dumps(node, ensure_ascii=False)
+    if isinstance(node, dict):
+        if not node:
+            return "{}"
+        items = [pad + "  " + json.dumps(k) + ": " + dump_config(v, indent + 1) for k, v in node.items()]
+        return "{\n" + ",\n".join(items) + "\n" + pad + "}"
+    if all(not isinstance(x, (dict, list)) for x in node):
+        return json.dumps(node)
+    return "[\n" + ",\n".join(pad + "  " + dump_config(v, indent + 1) for v in node) + "\n" + pad + "]"
+
+
 def _parse_cli_value(text):
     try:
         return json.loads(text)

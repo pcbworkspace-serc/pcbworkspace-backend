@@ -138,13 +138,15 @@ another third-party copy) or a capstan drive.
 
 ## Action items
 
-1. [ ] Buy one 50:1 NEMA 17 strain-wave reducer. Lock the motor and measure
-   lost motion with a dial indicator at a known radius, loading both ways.
-   Then step the input through one full output turn and measure transmission
-   error with the top camera on a target on the output. Enter both in
-   `budget_config.json` (`joints.j1.reducer_*`) and rerun the budget.
-2. [ ] If TE ≤ 2 arcmin, buy the second reducer. If not, see "What would
-   change this".
+1. [ ] Buy one 50:1 NEMA 17 strain-wave reducer. Inspect it with
+   `python -m metrology.reducer_inspect` (procedure in
+   [README.md](README.md#reducer-inspection-before-buying-the-second-reducer)).
+   It measures transmission error over one output turn and two input turns,
+   plus lost motion and stiffness under lever loads. `--update-config` writes
+   the results into the budget and reruns it.
+2. [ ] If the tool says PASS, buy the second reducer. If it says UNCERTAIN,
+   measure more. If it says FAIL, or passes only with the TE map, see "What
+   would change this".
 3. [ ] Redesign the base and elbow mounts for the reducer flange, with links
    bolted to the output flange. Add an output-side home switch on J1 and J2.
 4. [ ] Move the second AS5048A to the elbow motor. Confirm what the shoulder

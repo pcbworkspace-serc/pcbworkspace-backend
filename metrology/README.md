@@ -8,6 +8,7 @@ their output. Only measurements from the assembled arm can replace them.
 | Step | Tool | Needs hardware? | Output |
 | --- | --- | --- | --- |
 | A. Error budget | `python -m metrology.error_budget` | No | [ERROR_BUDGET.md](ERROR_BUDGET.md): predicted accuracy, ranked error sources, what to measure; [ADR-001](ADR-001-joint-drive.md): the joint drive it led to |
+| Reducer gate | `python -m metrology.reducer_inspect plan / angles / analyze` | One reducer + camera | Transmission error, lost motion and stiffness with 95% intervals; PASS / FAIL / UNCERTAIN; budget rerun with the measured values |
 | B1. Camera intrinsics | `python -m metrology.charuco_calib intrinsics photos/ ...` | Camera + printed target | Camera matrix, lens distortion, reprojection error (in-sample and held-out) |
 | B2. Board plane | `python -m metrology.charuco_calib homography plane.jpg ...` | Camera + target | POST body for `/calibration/save`, with distortion correction and residuals |
 | B3. Arm geometry | `python -m metrology.kinematic_fit plan / fit` | Assembled arm | `arm_calibration.json`: link lengths, base offset, joint zeros, with standard errors |
@@ -42,6 +43,32 @@ datasheets and stated assumptions.
 Every assumed input is listed at the bottom of the report with its path in
 [budget_config.json](budget_config.json). Measure it, edit the value, change the
 source, and re-run.
+
+## Reducer inspection (before buying the second reducer)
+
+```
+python -m metrology.reducer_inspect plan --out te_plan.csv --lost-motion-out lm.csv
+# glue a small ChArUco target flat and centred on the output flange, camera looking along the axis;
+# step the input through te_plan.csv (always the same direction), 3 photos per position
+python -m metrology.reducer_inspect angles te_plan.csv --images shots/ --intrinsics top_camera.json --square-mm 6.02 --squares-x 6 --squares-y 6 --marker-mm 4.5 --dictionary DICT_4X4_50
+# lock the input, hang the lever weights in the lm.csv order, fill angle_deg (or dial_mm with --radius-mm)
+python -m metrology.reducer_inspect analyze te_plan.csv --lost-motion lm.csv --label "supplier, model, serial" --update-config --out reducer_report.md
+```
+
+- **TE is judged on a fitted curve, not on raw readings.** One photo reads
+  the angle to about 1 arcmin, close to the 2 arcmin gate. The tool averages
+  photos, fits the once-per-output-turn and twice-per-input-turn
+  components, and puts a 95% interval on the result.
+- **The gate has three outcomes.** It's PASS only when the whole interval is
+  under the gate and FAIL only when the whole interval is over it. Anything
+  in between is UNCERTAIN: measure more. If the measurement noise is too
+  high, the result is "can't judge".
+- **Check a FAIL near the gate.** Before trusting it, glue the target 90°
+  further round and measure again. Error that moves with the target is
+  measurement error; error that stays with the reducer is real.
+- **`--update-config` closes the loop.** It writes the measured values into
+  the strain-wave option of `budget_config.json` and reruns the budget. It
+  refuses to write synthetic readings there.
 
 ## B. Calibration
 
