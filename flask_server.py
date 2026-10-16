@@ -56,12 +56,15 @@ def _load_saved_calibration():
     try:
         with open(CALIBRATION_PATH, "r") as f:
             data = json.load(f)
-            return data.get("homography"), data.get("board_size_mm")
+            return data.get("homography"), data.get("board_size_mm"), data.get("intrinsics")
     except (FileNotFoundError, json.JSONDecodeError):
-        return None, None
+        return None, None, None
 
 
-_saved_homography, _saved_board_size = _load_saved_calibration()
+# _saved_intrinsics: camera matrix + lens distortion (metrology/charuco_calib.py).
+# When set, the homography maps UNDISTORTED pixels to mm, so any pixel fed
+# through it must be undistorted with these first.
+_saved_homography, _saved_board_size, _saved_intrinsics = _load_saved_calibration()
 
 
 def _get_board_bounds():
@@ -331,7 +334,12 @@ def nn_status():
         },
         "robot_safety": {
             "board_bounds_clamp": {"description": "clamp_vla_action - drops/clamps out-of-range or malformed robot actions"},
-            "kinematic_reach_check": {"description": "filter_unreachable_actions - drops in-bounds-but-unreachable targets (ARM_BASE_OFFSET_MM is an unmeasured placeholder, see layout_engine.py)"},
+            "kinematic_reach_check": {
+                "description": "filter_unreachable_actions - drops in-bounds-but-unreachable targets",
+                "arm_geometry": layout_engine.ARM_GEOMETRY_SOURCE,
+                "note": ("ARM_BASE_OFFSET_MM is an unmeasured placeholder; metrology/kinematic_fit.py measures it"
+                         if layout_engine.ARM_GEOMETRY_SOURCE == "placeholder" else "from arm_calibration.json"),
+            },
         },
         "data_capture": {
             "enabled": CAPTURE_TRAINING_DATA,
@@ -560,9 +568,10 @@ def nn_items_state():
 @app.route("/calibration/save", methods=["POST"])
 @require_api_key
 def calibration_save():
-    global _saved_homography, _saved_board_size
+    global _saved_homography, _saved_board_size, _saved_intrinsics
     if not CV2_AVAILABLE:
         return jsonify({"error": "OpenCV not installed"}), 503
+    from metrology import charuco_calib
 
     data = request.get_json() or {}
     pixel_pts = data.get("pixel_points")
@@ -578,35 +587,67 @@ def calibration_save():
         except (KeyError, TypeError, ValueError):
             return jsonify({"error": "board_size_mm must be {w_mm, h_mm} if provided"}), 400
 
+    # optional: camera matrix + lens distortion from metrology/charuco_calib.py.
+    # A homography can't represent lens distortion, so without this the
+    # error grows toward the image edges on a cheap USB lens.
+    intrinsics = data.get("intrinsics")
+    if intrinsics is not None:
+        try:
+            K = np.array(intrinsics["camera_matrix"], dtype=np.float64)
+            dist = np.array(intrinsics["dist_coeffs"], dtype=np.float64).ravel()
+            if K.shape != (3, 3) or dist.size not in (4, 5, 8, 12, 14) or not np.all(np.isfinite(K)):
+                raise ValueError
+            intrinsics = {"camera_matrix": K.tolist(), "dist_coeffs": dist.tolist()}
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"error": "intrinsics must be {camera_matrix: 3x3, dist_coeffs: 4/5/8/12/14 numbers} if provided"}), 400
+
     if not pixel_pts or not world_pts or len(pixel_pts) != len(world_pts):
         return jsonify({"error": "Need matching pixel_points and world_points"}), 400
     if len(pixel_pts) < 4:
         return jsonify({"error": "Need at least 4 point pairs"}), 400
 
     try:
-        src = np.array(pixel_pts, dtype=np.float32)
-        dst = np.array(world_pts, dtype=np.float32)
-        H, _mask = cv2.findHomography(src, dst, method=0)
-        if H is None:
-            return jsonify({"error": "Homography computation failed (collinear points?)"}), 400
+        src = np.array(pixel_pts, dtype=np.float64)
+        dst = np.array(world_pts, dtype=np.float64)
+    except (TypeError, ValueError):
+        return jsonify({"error": "pixel_points and world_points must be [[x, y], ...] numbers"}), 400
+    if src.ndim != 2 or src.shape[1] != 2 or dst.shape != src.shape:
+        return jsonify({"error": "pixel_points and world_points must be [[x, y], ...] numbers"}), 400
 
-        H_list = H.tolist()
-        with _calibration_lock:
-            _saved_homography = H_list
-            _saved_board_size = board_size_mm
-            try:
-                with open(CALIBRATION_PATH, "w") as f:
-                    json.dump({
-                        "homography": H_list,
-                        "point_count": len(pixel_pts),
-                        "board_size_mm": board_size_mm,
-                    }, f)
-            except OSError as e:
-                print(f"  WARN: could not persist calibration to disk: {e}")
-
-        return jsonify({"ok": True, "homography": H_list, "board_size_mm": board_size_mm})
+    try:
+        if intrinsics:
+            src = charuco_calib.undistort_pixels(src, intrinsics["camera_matrix"], intrinsics["dist_coeffs"])
+        fit = charuco_calib.homography_residuals(src, dst)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+    H_list = fit["homography"]
+    residual = {k: fit[k] for k in ("n_points", "rms_mm", "max_mm", "heldout_rms_mm")}
+    if len(src) == 4:
+        residual["note"] = ("4 points fit a homography exactly, so this residual is 0 by construction and checks "
+                            "nothing. Send 10+ points (charuco_calib.py gives ~40) to get a held-out error.")
+    elif residual["heldout_rms_mm"] is None:
+        residual["note"] = "Held-out error needs 10+ points."
+    with _calibration_lock:
+        _saved_homography = H_list
+        _saved_board_size = board_size_mm
+        _saved_intrinsics = intrinsics
+        try:
+            with open(CALIBRATION_PATH, "w") as f:
+                json.dump({
+                    "homography": H_list,
+                    "point_count": len(pixel_pts),
+                    "board_size_mm": board_size_mm,
+                    "intrinsics": intrinsics,
+                    "residual": residual,
+                }, f)
+        except OSError as e:
+            print(f"  WARN: could not persist calibration to disk: {e}")
+
+    return jsonify({"ok": True, "homography": H_list, "board_size_mm": board_size_mm,
+                    "distortion_corrected": intrinsics is not None, "residual": residual})
 
 
 @app.route("/calibration/get")
@@ -614,18 +655,21 @@ def calibration_get():
     with _calibration_lock:
         H = _saved_homography
         board_size_mm = _saved_board_size
+        intrinsics = _saved_intrinsics
     if H is None:
         return jsonify({"error": "No calibration saved"}), 404
-    return jsonify({"homography": H, "board_size_mm": board_size_mm})
+    return jsonify({"homography": H, "board_size_mm": board_size_mm, "intrinsics": intrinsics,
+                    "distortion_corrected": intrinsics is not None})
 
 
 @app.route("/calibration/clear", methods=["POST"])
 @require_api_key
 def calibration_clear():
-    global _saved_homography, _saved_board_size
+    global _saved_homography, _saved_board_size, _saved_intrinsics
     with _calibration_lock:
         _saved_homography = None
         _saved_board_size = None
+        _saved_intrinsics = None
         try:
             os.remove(CALIBRATION_PATH)
         except (FileNotFoundError, OSError):
