@@ -4,15 +4,19 @@
 
 Targets (hardware_plan_v3, section 9): accuracy < 0.15 mm RMS, repeatability < 0.1 mm std. Errors are evaluated at the worst point on the board, for an 0805.
 
-## Scenarios (each adds to the one above)
+## Scenarios
+
+Steps without a letter each add to the step above. Lettered options are alternative joint drives, each applied on top of the step it branches from.
 
 | Scenario | Accuracy RMS (mm) | 95% radial (mm) | Repeatability std (mm) | ISO RP (mm) | Meets targets |
 | --- | --- | --- | --- | --- | --- |
 | As documented: open loop, nothing calibrated | 5.280 | 9.286 | 0.681 | 1.759 | no / no |
-| + camera, kinematic and nozzle calibration | 0.808 | 1.532 | 0.680 | 1.759 | no / no |
-| + one-sided approach to every target | 0.415 | 0.780 | 0.036 | 0.115 | no / yes |
-| + closed loop on linearized AS5048A at both planar joints | 0.256 | 0.470 | 0.095 | 0.249 | no / yes |
-| Hypothetical: + 10:1 reduction on both planar joints *(hypothetical)* | 0.175 | 0.309 | 0.037 | 0.117 | no / yes |
+| + camera, kinematic and nozzle calibration | 0.794 | 1.509 | 0.680 | 1.759 | no / no |
+| + one-sided approach to every target | 0.388 | 0.735 | 0.036 | 0.115 | no / yes |
+| Option A: direct drive, closed loop on linearized AS5048A at both joints | 0.208 | 0.390 | 0.095 | 0.249 | no / yes |
+| Option B: GT2 belt 4:1, open loop | 0.235 | 0.442 | 0.036 | 0.115 | no / yes |
+| Option C: GT2 belt 4:1, closed loop on output-shaft AS5048A | 0.201 | 0.376 | 0.095 | 0.249 | no / yes |
+| Option D: 50:1 strain-wave reducer, open loop, encoders check for missed steps **(recommended)** | 0.129 | 0.235 | 0.036 | 0.115 | yes / yes |
 
 "Meets targets" is accuracy / repeatability. ISO RP = mean distance + 3 std of distance, from the cycle-to-cycle terms only.
 
@@ -57,171 +61,224 @@ Worst board point (62.0, 42.0) mm, 265.0 mm from the base. Board-average accurac
 
 ## + camera, kinematic and nozzle calibration
 
-Worst board point (62.0, 42.0) mm, 265.0 mm from the base. Board-average accuracy RMS: 0.750 mm.
+Worst board point (62.0, 42.0) mm, 265.0 mm from the base. Board-average accuracy RMS: 0.736 mm.
 
 | # | Error source | Class | Input (1 sigma) | At tip (mm RMS) | Share | Source of the input |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | J1 base load deflection (hose drag, friction) | direction | 0.1042 deg | 0.482 | 36% | assumed: vacuum hose and wiring drag plus bearing friction. Measure it |
-| 2 | J2 elbow load deflection (hose drag, friction) | direction | 0.1389 deg | 0.436 | 29% | assumed: hose drag at the wrist. Measure it |
+| 1 | J1 base load deflection (hose drag, friction) | direction | 0.1042 deg | 0.482 | 37% | assumed: vacuum hose and wiring drag plus bearing friction. Measure it |
+| 2 | J2 elbow load deflection (hose drag, friction) | direction | 0.1389 deg | 0.436 | 30% | assumed: hose drag at the wrist. Measure it |
 | 3 | J1 base stepper position error (+/-5% of a full step) | fixed | 0.0520 deg | 0.240 | 9% | typical hybrid-stepper datasheet: +/-5% of a full step, no load |
 | 4 | J1 base backlash in the coupling | direction | 0.0500 deg | 0.231 | 8% | assumed with the spring anti-backlash nuts; the hardware doc's figure without them is 0.3 deg |
 | 5 | J2 elbow stepper position error (+/-5% of a full step) | fixed | 0.0520 deg | 0.163 | 4% | typical hybrid-stepper datasheet: +/-5% of a full step, no load |
 | 6 | J2 elbow backlash in the coupling | direction | 0.0500 deg | 0.157 | 4% | assumed with the spring anti-backlash nuts; the hardware doc's figure without them is 0.3 deg |
-| 7 | J1 base step resolution | fixed | 0.0325 deg | 0.150 | 3% | assumed TMC2209 setting |
+| 7 | J1 base step resolution | fixed | 0.0325 deg | 0.150 | 4% | assumed TMC2209 setting |
 | 8 | J2 elbow step resolution | fixed | 0.0325 deg | 0.102 | 2% | assumed TMC2209 setting |
-| 9 | J1 base zero offset | fixed | 0.0200 deg | 0.093 | 1% | assumed until metrology/kinematic_fit.py reports real standard errors |
-| 10 | J2 elbow homing repeatability | session | 0.0289 deg | 0.091 | 1% | assumed limit switch at the elbow |
-| 11 | Arm base position vs board | fixed | 0.0500 mm | 0.071 | 1% | assumed until metrology/kinematic_fit.py reports real standard errors |
-| 12 | J2 elbow zero offset | fixed | 0.0200 deg | 0.063 | 1% | assumed until metrology/kinematic_fit.py reports real standard errors |
-| 13 | Link 2 length | fixed | 0.0500 mm | 0.050 | 0% | assumed until metrology/kinematic_fit.py reports real standard errors |
-| 14 | Link 1 length | fixed | 0.0500 mm | 0.050 | 0% | assumed until metrology/kinematic_fit.py reports real standard errors |
-| 15 | Part shift on vacuum release | random | 0.0300 mm | 0.042 | 0% | assumed: part shift when vacuum releases |
-| 16 | Link and printed-joint bending under hose load | fixed | 0.0167 mm | 0.024 | 0% | tube: computed F*L^3/(3EI) = 0.0089 mm; joints: assumed tip deflection from the PETG joints under the same load |
-| 17 | Top camera residual after ChArUco calibration | fixed | 0.0166 mm | 0.023 | 0% | assumed after calibration; metrology/charuco_calib.py reports the real value |
-| 18 | Residual vibration at placement | random | 0.0141 mm | 0.020 | 0% | assumed residual vibration after the 150 ms settle (hardware doc) |
-| 19 | Top camera height mismatch (homography plane vs board top) | fixed | 0.0122 mm | 0.017 | 0% | assumed 10% board-thickness tolerance once the plane is matched |
-| 20 | Top camera fiducial location | session | 0.0110 mm | 0.016 | 0% | assumed sub-pixel fiducial centroid |
-| 21 | Part rotation error at the part's end (0805) | random | 0.0087 mm | 0.012 | 0% | assumed part-angle measurement noise |
-| 22 | Thermal growth of printed parts | session | 0.0118 mm | 0.012 | 0% | typical PETG datasheet value |
-| 23 | Bottom camera part location | random | 0.0075 mm | 0.011 | 0% | assumed part-outline centroid noise |
-| 24 | Nozzle axis position in the bottom image | fixed | 0.0075 mm | 0.011 | 0% | assumed part-outline centroid noise |
-| 25 | Nozzle runout | random | 0.0071 mm | 0.010 | 0% | assumed after runout compensation |
-| 26 | Bottom camera mm-per-pixel error | random | 0.0006 mm | 0.001 | 0% | assumed after calibration |
+| 9 | J2 elbow homing repeatability | session | 0.0289 deg | 0.091 | 1% | assumed limit switch at the elbow |
+| 10 | Part shift on vacuum release | random | 0.0300 mm | 0.042 | 0% | assumed: part shift when vacuum releases |
+| 11 | Link and printed-joint bending under hose load | fixed | 0.0167 mm | 0.024 | 0% | tube: computed F*L^3/(3EI) = 0.0089 mm; joints: assumed tip deflection from the PETG joints under the same load |
+| 12 | Top camera residual after ChArUco calibration | fixed | 0.0166 mm | 0.023 | 0% | assumed after calibration; metrology/charuco_calib.py reports the real value |
+| 13 | Residual vibration at placement | random | 0.0141 mm | 0.020 | 0% | assumed residual vibration after the 150 ms settle (hardware doc) |
+| 14 | Top camera height mismatch (homography plane vs board top) | fixed | 0.0122 mm | 0.017 | 0% | assumed 10% board-thickness tolerance once the plane is matched |
+| 15 | Top camera fiducial location | session | 0.0110 mm | 0.016 | 0% | assumed sub-pixel fiducial centroid |
+| 16 | Kinematic calibration uncertainty (zeros, links, base offset) | fixed | fit covariance | 0.014 | 0% | predicted for 25 planned poses; tip measurement assumed: top camera reading a target on the nozzle after ChArUco calibration |
+| 17 | Part rotation error at the part's end (0805) | random | 0.0087 mm | 0.012 | 0% | assumed part-angle measurement noise |
+| 18 | Thermal growth of printed parts | session | 0.0118 mm | 0.012 | 0% | typical PETG datasheet value |
+| 19 | Bottom camera part location | random | 0.0075 mm | 0.011 | 0% | assumed part-outline centroid noise |
+| 20 | Nozzle axis position in the bottom image | fixed | 0.0075 mm | 0.011 | 0% | assumed part-outline centroid noise |
+| 21 | Nozzle runout | random | 0.0071 mm | 0.010 | 0% | assumed after runout compensation |
+| 22 | Bottom camera mm-per-pixel error | random | 0.0006 mm | 0.001 | 0% | assumed after calibration |
 
 **Fix first:**
 
-- **J1 base load deflection (hose drag, friction)** (36%). Measure: Push the nozzle tangentially with a force gauge at standstill and read the angle change; hang the hose and measure its pull. Fix: Closed loop, more hold current, reduction (stiffness grows with ratio squared), lighter hose routing.
-- **J2 elbow load deflection (hose drag, friction)** (29%). Measure: Push the nozzle tangentially with a force gauge at standstill and read the angle change; hang the hose and measure its pull. Fix: Closed loop, more hold current, reduction (stiffness grows with ratio squared), lighter hose routing.
+- **J1 base load deflection (hose drag, friction)** (37%). Measure: Push the nozzle tangentially with a force gauge at standstill and read the angle change; hang the hose and measure its pull. Fix: Reduction (motor stiffness grows with ratio squared), a stiffer reducer, closed loop, lighter hose routing.
+- **J2 elbow load deflection (hose drag, friction)** (30%). Measure: Push the nozzle tangentially with a force gauge at standstill and read the angle change; hang the hose and measure its pull. Fix: Reduction (motor stiffness grows with ratio squared), a stiffer reducer, closed loop, lighter hose routing.
 - **J1 base stepper position error (+/-5% of a full step)** (9%). Measure: Step through 4 full steps in microsteps and read the real angle (encoder or camera); repeat at a few angles. Fix: Closed loop on a linearized encoder, or reduction.
 
 ## + one-sided approach to every target
 
-Worst board point (62.0, 42.0) mm, 265.0 mm from the base. Board-average accuracy RMS: 0.385 mm.
+Worst board point (62.0, 42.0) mm, 265.0 mm from the base. Board-average accuracy RMS: 0.358 mm.
 
 | # | Error source | Class | Input (1 sigma) | At tip (mm RMS) | Share | Source of the input |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | J1 base stepper position error (+/-5% of a full step) | fixed | 0.0520 deg | 0.240 | 33% | typical hybrid-stepper datasheet: +/-5% of a full step, no load |
-| 2 | J2 elbow stepper position error (+/-5% of a full step) | fixed | 0.0520 deg | 0.163 | 15% | typical hybrid-stepper datasheet: +/-5% of a full step, no load |
-| 3 | J1 base step resolution | fixed | 0.0325 deg | 0.150 | 13% | assumed TMC2209 setting |
-| 4 | J2 elbow step resolution | fixed | 0.0325 deg | 0.102 | 6% | assumed TMC2209 setting |
-| 5 | J1 base load deflection (hose drag, friction) | direction | 0.0208 deg | 0.096 | 5% | assumed: vacuum hose and wiring drag plus bearing friction. Measure it |
-| 6 | J1 base zero offset | fixed | 0.0200 deg | 0.093 | 5% | assumed until metrology/kinematic_fit.py reports real standard errors |
-| 7 | J2 elbow homing repeatability | session | 0.0289 deg | 0.091 | 5% | assumed limit switch at the elbow |
-| 8 | J2 elbow load deflection (hose drag, friction) | direction | 0.0278 deg | 0.087 | 4% | assumed: hose drag at the wrist. Measure it |
-| 9 | Arm base position vs board | fixed | 0.0500 mm | 0.071 | 3% | assumed until metrology/kinematic_fit.py reports real standard errors |
-| 10 | J2 elbow zero offset | fixed | 0.0200 deg | 0.063 | 2% | assumed until metrology/kinematic_fit.py reports real standard errors |
-| 11 | Link 2 length | fixed | 0.0500 mm | 0.050 | 1% | assumed until metrology/kinematic_fit.py reports real standard errors |
-| 12 | Link 1 length | fixed | 0.0500 mm | 0.050 | 1% | assumed until metrology/kinematic_fit.py reports real standard errors |
-| 13 | J1 base backlash in the coupling | direction | 0.0100 deg | 0.046 | 1% | assumed with the spring anti-backlash nuts; the hardware doc's figure without them is 0.3 deg |
-| 14 | Part shift on vacuum release | random | 0.0300 mm | 0.042 | 1% | assumed: part shift when vacuum releases |
-| 15 | J2 elbow backlash in the coupling | direction | 0.0100 deg | 0.031 | 1% | assumed with the spring anti-backlash nuts; the hardware doc's figure without them is 0.3 deg |
-| 16 | Link and printed-joint bending under hose load | fixed | 0.0167 mm | 0.024 | 0% | tube: computed F*L^3/(3EI) = 0.0089 mm; joints: assumed tip deflection from the PETG joints under the same load |
-| 17 | Top camera residual after ChArUco calibration | fixed | 0.0166 mm | 0.023 | 0% | assumed after calibration; metrology/charuco_calib.py reports the real value |
-| 18 | Residual vibration at placement | random | 0.0141 mm | 0.020 | 0% | assumed residual vibration after the 150 ms settle (hardware doc) |
-| 19 | Top camera height mismatch (homography plane vs board top) | fixed | 0.0122 mm | 0.017 | 0% | assumed 10% board-thickness tolerance once the plane is matched |
-| 20 | Top camera fiducial location | session | 0.0110 mm | 0.016 | 0% | assumed sub-pixel fiducial centroid |
-| 21 | Part rotation error at the part's end (0805) | random | 0.0087 mm | 0.012 | 0% | assumed part-angle measurement noise |
-| 22 | Thermal growth of printed parts | session | 0.0118 mm | 0.012 | 0% | typical PETG datasheet value |
-| 23 | Bottom camera part location | random | 0.0075 mm | 0.011 | 0% | assumed part-outline centroid noise |
-| 24 | Nozzle axis position in the bottom image | fixed | 0.0075 mm | 0.011 | 0% | assumed part-outline centroid noise |
-| 25 | Nozzle runout | random | 0.0071 mm | 0.010 | 0% | assumed after runout compensation |
-| 26 | Bottom camera mm-per-pixel error | random | 0.0006 mm | 0.001 | 0% | assumed after calibration |
+| 1 | J1 base stepper position error (+/-5% of a full step) | fixed | 0.0520 deg | 0.240 | 38% | typical hybrid-stepper datasheet: +/-5% of a full step, no load |
+| 2 | J2 elbow stepper position error (+/-5% of a full step) | fixed | 0.0520 deg | 0.163 | 18% | typical hybrid-stepper datasheet: +/-5% of a full step, no load |
+| 3 | J1 base step resolution | fixed | 0.0325 deg | 0.150 | 15% | assumed TMC2209 setting |
+| 4 | J2 elbow step resolution | fixed | 0.0325 deg | 0.102 | 7% | assumed TMC2209 setting |
+| 5 | J1 base load deflection (hose drag, friction) | direction | 0.0208 deg | 0.096 | 6% | assumed: vacuum hose and wiring drag plus bearing friction. Measure it |
+| 6 | J2 elbow homing repeatability | session | 0.0289 deg | 0.091 | 5% | assumed limit switch at the elbow |
+| 7 | J2 elbow load deflection (hose drag, friction) | direction | 0.0278 deg | 0.087 | 5% | assumed: hose drag at the wrist. Measure it |
+| 8 | J1 base backlash in the coupling | direction | 0.0100 deg | 0.046 | 1% | assumed with the spring anti-backlash nuts; the hardware doc's figure without them is 0.3 deg |
+| 9 | Part shift on vacuum release | random | 0.0300 mm | 0.042 | 1% | assumed: part shift when vacuum releases |
+| 10 | J2 elbow backlash in the coupling | direction | 0.0100 deg | 0.031 | 1% | assumed with the spring anti-backlash nuts; the hardware doc's figure without them is 0.3 deg |
+| 11 | Link and printed-joint bending under hose load | fixed | 0.0167 mm | 0.024 | 0% | tube: computed F*L^3/(3EI) = 0.0089 mm; joints: assumed tip deflection from the PETG joints under the same load |
+| 12 | Top camera residual after ChArUco calibration | fixed | 0.0166 mm | 0.023 | 0% | assumed after calibration; metrology/charuco_calib.py reports the real value |
+| 13 | Residual vibration at placement | random | 0.0141 mm | 0.020 | 0% | assumed residual vibration after the 150 ms settle (hardware doc) |
+| 14 | Top camera height mismatch (homography plane vs board top) | fixed | 0.0122 mm | 0.017 | 0% | assumed 10% board-thickness tolerance once the plane is matched |
+| 15 | Top camera fiducial location | session | 0.0110 mm | 0.016 | 0% | assumed sub-pixel fiducial centroid |
+| 16 | Kinematic calibration uncertainty (zeros, links, base offset) | fixed | fit covariance | 0.014 | 0% | predicted for 25 planned poses; tip measurement assumed: top camera reading a target on the nozzle after ChArUco calibration |
+| 17 | Part rotation error at the part's end (0805) | random | 0.0087 mm | 0.012 | 0% | assumed part-angle measurement noise |
+| 18 | Thermal growth of printed parts | session | 0.0118 mm | 0.012 | 0% | typical PETG datasheet value |
+| 19 | Bottom camera part location | random | 0.0075 mm | 0.011 | 0% | assumed part-outline centroid noise |
+| 20 | Nozzle axis position in the bottom image | fixed | 0.0075 mm | 0.011 | 0% | assumed part-outline centroid noise |
+| 21 | Nozzle runout | random | 0.0071 mm | 0.010 | 0% | assumed after runout compensation |
+| 22 | Bottom camera mm-per-pixel error | random | 0.0006 mm | 0.001 | 0% | assumed after calibration |
 
 **Fix first:**
 
-- **J1 base stepper position error (+/-5% of a full step)** (33%). Measure: Step through 4 full steps in microsteps and read the real angle (encoder or camera); repeat at a few angles. Fix: Closed loop on a linearized encoder, or reduction.
-- **J2 elbow stepper position error (+/-5% of a full step)** (15%). Measure: Step through 4 full steps in microsteps and read the real angle (encoder or camera); repeat at a few angles. Fix: Closed loop on a linearized encoder, or reduction.
-- **J1 base step resolution** (13%). Measure: Fixed by steps/rev, microsteps and gear ratio. Fix: Reduction (belt or gearbox) between motor and joint.
+- **J1 base stepper position error (+/-5% of a full step)** (38%). Measure: Step through 4 full steps in microsteps and read the real angle (encoder or camera); repeat at a few angles. Fix: Closed loop on a linearized encoder, or reduction.
+- **J2 elbow stepper position error (+/-5% of a full step)** (18%). Measure: Step through 4 full steps in microsteps and read the real angle (encoder or camera); repeat at a few angles. Fix: Closed loop on a linearized encoder, or reduction.
+- **J1 base step resolution** (15%). Measure: Fixed by steps/rev, microsteps and gear ratio. Fix: Reduction between motor and joint.
 
-## + closed loop on linearized AS5048A at both planar joints
+## Option A: direct drive, closed loop on linearized AS5048A at both joints
 
-Worst board point (62.0, 42.0) mm, 265.0 mm from the base. Board-average accuracy RMS: 0.239 mm.
-
-| # | Error source | Class | Input (1 sigma) | At tip (mm RMS) | Share | Source of the input |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | J1 base encoder non-linearity | fixed | 0.0289 deg | 0.134 | 27% | AS5048A datasheet: 0.05 deg system accuracy, only with linearization and averaging in the MCU |
-| 2 | J1 base zero offset | fixed | 0.0200 deg | 0.093 | 13% | assumed until metrology/kinematic_fit.py reports real standard errors |
-| 3 | J2 elbow encoder non-linearity | fixed | 0.0289 deg | 0.091 | 13% | AS5048A datasheet: 0.05 deg system accuracy, only with linearization and averaging in the MCU |
-| 4 | J1 base closed-loop settling band (one microstep) | random | 0.0162 deg | 0.075 | 9% | scenario: + closed loop on linearized AS5048A at both planar joints |
-| 5 | Arm base position vs board | fixed | 0.0500 mm | 0.071 | 8% | assumed until metrology/kinematic_fit.py reports real standard errors |
-| 6 | J2 elbow zero offset | fixed | 0.0200 deg | 0.063 | 6% | assumed until metrology/kinematic_fit.py reports real standard errors |
-| 7 | J2 elbow closed-loop settling band (one microstep) | random | 0.0162 deg | 0.051 | 4% | scenario: + closed loop on linearized AS5048A at both planar joints |
-| 8 | Link 2 length | fixed | 0.0500 mm | 0.050 | 4% | assumed until metrology/kinematic_fit.py reports real standard errors |
-| 9 | Link 1 length | fixed | 0.0500 mm | 0.050 | 4% | assumed until metrology/kinematic_fit.py reports real standard errors |
-| 10 | J1 base backlash in the coupling | direction | 0.0100 deg | 0.046 | 3% | assumed with the spring anti-backlash nuts; the hardware doc's figure without them is 0.3 deg |
-| 11 | Part shift on vacuum release | random | 0.0300 mm | 0.042 | 3% | assumed: part shift when vacuum releases |
-| 12 | J2 elbow backlash in the coupling | direction | 0.0100 deg | 0.031 | 2% | assumed with the spring anti-backlash nuts; the hardware doc's figure without them is 0.3 deg |
-| 13 | J1 base encoder resolution | fixed | 0.0063 deg | 0.029 | 1% | AS5048A datasheet |
-| 14 | Link and printed-joint bending under hose load | fixed | 0.0167 mm | 0.024 | 1% | tube: computed F*L^3/(3EI) = 0.0089 mm; joints: assumed tip deflection from the PETG joints under the same load |
-| 15 | Top camera residual after ChArUco calibration | fixed | 0.0166 mm | 0.023 | 1% | assumed after calibration; metrology/charuco_calib.py reports the real value |
-| 16 | Residual vibration at placement | random | 0.0141 mm | 0.020 | 1% | assumed residual vibration after the 150 ms settle (hardware doc) |
-| 17 | J2 elbow encoder resolution | fixed | 0.0063 deg | 0.020 | 1% | AS5048A datasheet, if one is added |
-| 18 | Top camera height mismatch (homography plane vs board top) | fixed | 0.0122 mm | 0.017 | 0% | assumed 10% board-thickness tolerance once the plane is matched |
-| 19 | Top camera fiducial location | session | 0.0110 mm | 0.016 | 0% | assumed sub-pixel fiducial centroid |
-| 20 | Part rotation error at the part's end (0805) | random | 0.0087 mm | 0.012 | 0% | assumed part-angle measurement noise |
-| 21 | Thermal growth of printed parts | session | 0.0118 mm | 0.012 | 0% | typical PETG datasheet value |
-| 22 | Bottom camera part location | random | 0.0075 mm | 0.011 | 0% | assumed part-outline centroid noise |
-| 23 | Nozzle axis position in the bottom image | fixed | 0.0075 mm | 0.011 | 0% | assumed part-outline centroid noise |
-| 24 | Nozzle runout | random | 0.0071 mm | 0.010 | 0% | assumed after runout compensation |
-| 25 | Bottom camera mm-per-pixel error | random | 0.0006 mm | 0.001 | 0% | assumed after calibration |
-
-**Fix first:**
-
-- **J1 base encoder non-linearity** (27%). Measure: Rotate the joint through its range against a reference (camera on the ChArUco grid, or averaged full-step positions) and log encoder angle vs reference angle. Fix: Per-unit lookup-table linearization in firmware; centre the magnet within the datasheet limits.
-- **J1 base zero offset** (13%). Measure: Kinematic fit (metrology/kinematic_fit.py) estimates it with a standard error. Fix: Kinematic calibration.
-- **J2 elbow encoder non-linearity** (13%). Measure: Rotate the joint through its range against a reference (camera on the ChArUco grid, or averaged full-step positions) and log encoder angle vs reference angle. Fix: Per-unit lookup-table linearization in firmware; centre the magnet within the datasheet limits.
-
-## Hypothetical: + 10:1 reduction on both planar joints
-
-Worst board point (62.0, 42.0) mm, 265.0 mm from the base. Board-average accuracy RMS: 0.167 mm.
+Worst board point (62.0, 42.0) mm, 265.0 mm from the base. Board-average accuracy RMS: 0.192 mm.
 
 | # | Error source | Class | Input (1 sigma) | At tip (mm RMS) | Share | Source of the input |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | J1 base zero offset | fixed | 0.0200 deg | 0.093 | 28% | assumed until metrology/kinematic_fit.py reports real standard errors |
-| 2 | Arm base position vs board | fixed | 0.0500 mm | 0.071 | 16% | assumed until metrology/kinematic_fit.py reports real standard errors |
-| 3 | J2 elbow zero offset | fixed | 0.0200 deg | 0.063 | 13% | assumed until metrology/kinematic_fit.py reports real standard errors |
-| 4 | Link 2 length | fixed | 0.0500 mm | 0.050 | 8% | assumed until metrology/kinematic_fit.py reports real standard errors |
-| 5 | Link 1 length | fixed | 0.0500 mm | 0.050 | 8% | assumed until metrology/kinematic_fit.py reports real standard errors |
-| 6 | J1 base backlash in the coupling | direction | 0.0100 deg | 0.046 | 7% | assumed with the spring anti-backlash nuts; the hardware doc's figure without them is 0.3 deg |
-| 7 | Part shift on vacuum release | random | 0.0300 mm | 0.042 | 6% | assumed: part shift when vacuum releases |
-| 8 | J2 elbow backlash in the coupling | direction | 0.0100 deg | 0.031 | 3% | assumed with the spring anti-backlash nuts; the hardware doc's figure without them is 0.3 deg |
-| 9 | Link and printed-joint bending under hose load | fixed | 0.0167 mm | 0.024 | 2% | tube: computed F*L^3/(3EI) = 0.0089 mm; joints: assumed tip deflection from the PETG joints under the same load |
-| 10 | Top camera residual after ChArUco calibration | fixed | 0.0166 mm | 0.023 | 2% | assumed after calibration; metrology/charuco_calib.py reports the real value |
+| 1 | J1 base encoder non-linearity (motor shaft) | fixed | 0.0289 deg | 0.134 | 41% | AS5048A datasheet: 0.05 deg system accuracy, only with linearization and averaging in the MCU |
+| 2 | J2 elbow encoder non-linearity (motor shaft) | fixed | 0.0289 deg | 0.091 | 19% | AS5048A datasheet: 0.05 deg system accuracy, only with linearization and averaging in the MCU |
+| 3 | J1 base closed-loop settling band | random | 0.0162 deg | 0.075 | 13% | option A: TMC2209 at 64 microsteps |
+| 4 | J2 elbow closed-loop settling band | random | 0.0162 deg | 0.051 | 6% | option A: TMC2209 at 64 microsteps |
+| 5 | J1 base backlash in the coupling | direction | 0.0100 deg | 0.046 | 5% | assumed with the spring anti-backlash nuts; the hardware doc's figure without them is 0.3 deg |
+| 6 | Part shift on vacuum release | random | 0.0300 mm | 0.042 | 4% | assumed: part shift when vacuum releases |
+| 7 | J2 elbow backlash in the coupling | direction | 0.0100 deg | 0.031 | 2% | assumed with the spring anti-backlash nuts; the hardware doc's figure without them is 0.3 deg |
+| 8 | J1 base encoder resolution | fixed | 0.0063 deg | 0.029 | 2% | AS5048A datasheet |
+| 9 | Link and printed-joint bending under hose load | fixed | 0.0167 mm | 0.024 | 1% | tube: computed F*L^3/(3EI) = 0.0089 mm; joints: assumed tip deflection from the PETG joints under the same load |
+| 10 | Top camera residual after ChArUco calibration | fixed | 0.0166 mm | 0.023 | 1% | assumed after calibration; metrology/charuco_calib.py reports the real value |
 | 11 | Residual vibration at placement | random | 0.0141 mm | 0.020 | 1% | assumed residual vibration after the 150 ms settle (hardware doc) |
-| 12 | Top camera height mismatch (homography plane vs board top) | fixed | 0.0122 mm | 0.017 | 1% | assumed 10% board-thickness tolerance once the plane is matched |
-| 13 | Top camera fiducial location | session | 0.0110 mm | 0.016 | 1% | assumed sub-pixel fiducial centroid |
-| 14 | J1 base encoder non-linearity | fixed | 0.0029 deg | 0.013 | 1% | AS5048A datasheet: 0.05 deg system accuracy, only with linearization and averaging in the MCU |
-| 15 | Part rotation error at the part's end (0805) | random | 0.0087 mm | 0.012 | 1% | assumed part-angle measurement noise |
+| 12 | J2 elbow encoder resolution | fixed | 0.0063 deg | 0.020 | 1% | AS5048A datasheet, if one is added |
+| 13 | Top camera height mismatch (homography plane vs board top) | fixed | 0.0122 mm | 0.017 | 1% | assumed 10% board-thickness tolerance once the plane is matched |
+| 14 | Top camera fiducial location | session | 0.0110 mm | 0.016 | 1% | assumed sub-pixel fiducial centroid |
+| 15 | Kinematic calibration uncertainty (zeros, links, base offset) | fixed | fit covariance | 0.014 | 0% | predicted for 25 planned poses; tip measurement assumed: top camera reading a target on the nozzle after ChArUco calibration |
+| 16 | Part rotation error at the part's end (0805) | random | 0.0087 mm | 0.012 | 0% | assumed part-angle measurement noise |
+| 17 | Thermal growth of printed parts | session | 0.0118 mm | 0.012 | 0% | typical PETG datasheet value |
+| 18 | Bottom camera part location | random | 0.0075 mm | 0.011 | 0% | assumed part-outline centroid noise |
+| 19 | Nozzle axis position in the bottom image | fixed | 0.0075 mm | 0.011 | 0% | assumed part-outline centroid noise |
+| 20 | Nozzle runout | random | 0.0071 mm | 0.010 | 0% | assumed after runout compensation |
+| 21 | Bottom camera mm-per-pixel error | random | 0.0006 mm | 0.001 | 0% | assumed after calibration |
+
+**Fix first:**
+
+- **J1 base encoder non-linearity (motor shaft)** (41%). Measure: Rotate the joint through its range against a reference (camera on the ChArUco grid, or averaged full-step positions) and log encoder angle vs reference angle. Fix: Per-unit lookup-table linearization in firmware; centre the magnet within the datasheet limits.
+- **J2 elbow encoder non-linearity (motor shaft)** (19%). Measure: Rotate the joint through its range against a reference (camera on the ChArUco grid, or averaged full-step positions) and log encoder angle vs reference angle. Fix: Per-unit lookup-table linearization in firmware; centre the magnet within the datasheet limits.
+- **J1 base closed-loop settling band** (13%). Measure: Log encoder error at standstill after each move. Fix: Finer microstepping, or settle on the encoder count rather than the step count.
+
+## Option B: GT2 belt 4:1, open loop
+
+Worst board point (62.0, 42.0) mm, 265.0 mm from the base. Board-average accuracy RMS: 0.216 mm.
+
+| # | Error source | Class | Input (1 sigma) | At tip (mm RMS) | Share | Source of the input |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | J1 base reducer transmission error (GT2 belt 4:1) | fixed | 0.0370 deg | 0.171 | 53% | assumed: 0.02 mm pitch-circle runout on both pulleys -> 0.045 deg from the 80T plus 0.045 deg from the 20T after 4:1, combined |
+| 2 | J2 elbow reducer transmission error (GT2 belt 4:1) | fixed | 0.0370 deg | 0.116 | 24% | assumed: 0.02 mm pitch-circle runout on both pulleys -> 0.045 deg from the 80T plus 0.045 deg from the 20T after 4:1, combined |
+| 3 | J1 base stepper position error (+/-5% of a full step) | fixed | 0.0130 deg | 0.060 | 7% | typical hybrid-stepper datasheet: +/-5% of a full step, no load |
+| 4 | Part shift on vacuum release | random | 0.0300 mm | 0.042 | 3% | assumed: part shift when vacuum releases |
+| 5 | J2 elbow stepper position error (+/-5% of a full step) | fixed | 0.0130 deg | 0.041 | 3% | typical hybrid-stepper datasheet: +/-5% of a full step, no load |
+| 6 | J1 base step resolution | fixed | 0.0081 deg | 0.038 | 3% | assumed TMC2209 setting |
+| 7 | J2 elbow step resolution | fixed | 0.0081 deg | 0.026 | 1% | assumed TMC2209 setting |
+| 8 | Link and printed-joint bending under hose load | fixed | 0.0167 mm | 0.024 | 1% | tube: computed F*L^3/(3EI) = 0.0089 mm; joints: assumed tip deflection from the PETG joints under the same load |
+| 9 | Top camera residual after ChArUco calibration | fixed | 0.0166 mm | 0.023 | 1% | assumed after calibration; metrology/charuco_calib.py reports the real value |
+| 10 | Residual vibration at placement | random | 0.0141 mm | 0.020 | 1% | assumed residual vibration after the 150 ms settle (hardware doc) |
+| 11 | Top camera height mismatch (homography plane vs board top) | fixed | 0.0122 mm | 0.017 | 1% | assumed 10% board-thickness tolerance once the plane is matched |
+| 12 | J1 base load deflection (hose drag, friction) | direction | 0.0034 deg | 0.016 | 0% | assumed: vacuum hose and wiring drag plus bearing friction. Measure it |
+| 13 | Top camera fiducial location | session | 0.0110 mm | 0.016 | 0% | assumed sub-pixel fiducial centroid |
+| 14 | Kinematic calibration uncertainty (zeros, links, base offset) | fixed | fit covariance | 0.014 | 0% | predicted for 25 planned poses; tip measurement assumed: top camera reading a target on the nozzle after ChArUco calibration |
+| 15 | Part rotation error at the part's end (0805) | random | 0.0087 mm | 0.012 | 0% | assumed part-angle measurement noise |
 | 16 | Thermal growth of printed parts | session | 0.0118 mm | 0.012 | 0% | typical PETG datasheet value |
 | 17 | Bottom camera part location | random | 0.0075 mm | 0.011 | 0% | assumed part-outline centroid noise |
 | 18 | Nozzle axis position in the bottom image | fixed | 0.0075 mm | 0.011 | 0% | assumed part-outline centroid noise |
 | 19 | Nozzle runout | random | 0.0071 mm | 0.010 | 0% | assumed after runout compensation |
-| 20 | J2 elbow encoder non-linearity | fixed | 0.0029 deg | 0.009 | 0% | AS5048A datasheet: 0.05 deg system accuracy, only with linearization and averaging in the MCU |
-| 21 | J1 base closed-loop settling band (one microstep) | random | 0.0016 deg | 0.008 | 0% | scenario: + closed loop on linearized AS5048A at both planar joints |
-| 22 | J2 elbow closed-loop settling band (one microstep) | random | 0.0016 deg | 0.005 | 0% | scenario: + closed loop on linearized AS5048A at both planar joints |
-| 23 | J1 base encoder resolution | fixed | 0.0006 deg | 0.003 | 0% | AS5048A datasheet |
-| 24 | J2 elbow encoder resolution | fixed | 0.0006 deg | 0.002 | 0% | AS5048A datasheet, if one is added |
-| 25 | Bottom camera mm-per-pixel error | random | 0.0006 mm | 0.001 | 0% | assumed after calibration |
+| 20 | J1 base backlash in the coupling | direction | 0.0020 deg | 0.009 | 0% | assumed: link clamped to the 80T pulley hub |
+| 21 | J2 elbow load deflection (hose drag, friction) | direction | 0.0028 deg | 0.009 | 0% | assumed: hose drag at the wrist. Measure it |
+| 22 | J2 elbow backlash in the coupling | direction | 0.0020 deg | 0.006 | 0% | assumed: link clamped to the 80T pulley hub |
+| 23 | Bottom camera mm-per-pixel error | random | 0.0006 mm | 0.001 | 0% | assumed after calibration |
 
 **Fix first:**
 
-- **J1 base zero offset** (28%). Measure: Kinematic fit (metrology/kinematic_fit.py) estimates it with a standard error. Fix: Kinematic calibration.
-- **Arm base position vs board** (16%). Measure: Kinematic fit standard error. Fix: More, wider-spread calibration poses.
-- **J2 elbow zero offset** (13%). Measure: Kinematic fit (metrology/kinematic_fit.py) estimates it with a standard error. Fix: Kinematic calibration.
+- **J1 base reducer transmission error (GT2 belt 4:1)** (53%). Measure: Turn the input in steps over a full output revolution against an output-side reference (camera on a target on the link) and log the error. Fix: Per-joint error map from that measurement, or an output-side reference encoder.
+- **J2 elbow reducer transmission error (GT2 belt 4:1)** (24%). Measure: Turn the input in steps over a full output revolution against an output-side reference (camera on a target on the link) and log the error. Fix: Per-joint error map from that measurement, or an output-side reference encoder.
+- **J1 base stepper position error (+/-5% of a full step)** (7%). Measure: Step through 4 full steps in microsteps and read the real angle (encoder or camera); repeat at a few angles. Fix: Closed loop on a linearized encoder, or reduction.
+
+## Option C: GT2 belt 4:1, closed loop on output-shaft AS5048A
+
+Worst board point (62.0, 42.0) mm, 265.0 mm from the base. Board-average accuracy RMS: 0.185 mm.
+
+| # | Error source | Class | Input (1 sigma) | At tip (mm RMS) | Share | Source of the input |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | J1 base encoder non-linearity (output shaft) | fixed | 0.0289 deg | 0.134 | 44% | AS5048A datasheet: 0.05 deg system accuracy, only with linearization and averaging in the MCU |
+| 2 | J2 elbow encoder non-linearity (output shaft) | fixed | 0.0289 deg | 0.091 | 20% | AS5048A datasheet: 0.05 deg system accuracy, only with linearization and averaging in the MCU |
+| 3 | J1 base closed-loop settling band | random | 0.0162 deg | 0.075 | 14% | assumed TMC2209 setting |
+| 4 | J2 elbow closed-loop settling band | random | 0.0162 deg | 0.051 | 6% | assumed TMC2209 setting |
+| 5 | Part shift on vacuum release | random | 0.0300 mm | 0.042 | 4% | assumed: part shift when vacuum releases |
+| 6 | J1 base encoder resolution | fixed | 0.0063 deg | 0.029 | 2% | AS5048A datasheet |
+| 7 | Link and printed-joint bending under hose load | fixed | 0.0167 mm | 0.024 | 1% | tube: computed F*L^3/(3EI) = 0.0089 mm; joints: assumed tip deflection from the PETG joints under the same load |
+| 8 | Top camera residual after ChArUco calibration | fixed | 0.0166 mm | 0.023 | 1% | assumed after calibration; metrology/charuco_calib.py reports the real value |
+| 9 | Residual vibration at placement | random | 0.0141 mm | 0.020 | 1% | assumed residual vibration after the 150 ms settle (hardware doc) |
+| 10 | J2 elbow encoder resolution | fixed | 0.0063 deg | 0.020 | 1% | AS5048A datasheet, if one is added |
+| 11 | Top camera height mismatch (homography plane vs board top) | fixed | 0.0122 mm | 0.017 | 1% | assumed 10% board-thickness tolerance once the plane is matched |
+| 12 | Top camera fiducial location | session | 0.0110 mm | 0.016 | 1% | assumed sub-pixel fiducial centroid |
+| 13 | Kinematic calibration uncertainty (zeros, links, base offset) | fixed | fit covariance | 0.014 | 0% | predicted for 25 planned poses; tip measurement assumed: top camera reading a target on the nozzle after ChArUco calibration |
+| 14 | Part rotation error at the part's end (0805) | random | 0.0087 mm | 0.012 | 0% | assumed part-angle measurement noise |
+| 15 | Thermal growth of printed parts | session | 0.0118 mm | 0.012 | 0% | typical PETG datasheet value |
+| 16 | Bottom camera part location | random | 0.0075 mm | 0.011 | 0% | assumed part-outline centroid noise |
+| 17 | Nozzle axis position in the bottom image | fixed | 0.0075 mm | 0.011 | 0% | assumed part-outline centroid noise |
+| 18 | Nozzle runout | random | 0.0071 mm | 0.010 | 0% | assumed after runout compensation |
+| 19 | Bottom camera mm-per-pixel error | random | 0.0006 mm | 0.001 | 0% | assumed after calibration |
+
+**Fix first:**
+
+- **J1 base encoder non-linearity (output shaft)** (44%). Measure: Rotate the joint through its range against a reference (camera on the ChArUco grid, or averaged full-step positions) and log encoder angle vs reference angle. Fix: Per-unit lookup-table linearization in firmware; centre the magnet within the datasheet limits.
+- **J2 elbow encoder non-linearity (output shaft)** (20%). Measure: Rotate the joint through its range against a reference (camera on the ChArUco grid, or averaged full-step positions) and log encoder angle vs reference angle. Fix: Per-unit lookup-table linearization in firmware; centre the magnet within the datasheet limits.
+- **J1 base closed-loop settling band** (14%). Measure: Log encoder error at standstill after each move. Fix: Finer microstepping, or settle on the encoder count rather than the step count.
+
+## Option D: 50:1 strain-wave reducer, open loop, encoders check for missed steps
+
+Worst board point (62.0, 42.0) mm, 265.0 mm from the base. Board-average accuracy RMS: 0.121 mm.
+
+| # | Error source | Class | Input (1 sigma) | At tip (mm RMS) | Share | Source of the input |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | J1 base reducer transmission error (strain-wave 50:1) | fixed | 0.0192 deg | 0.089 | 48% | assumed: 2 arcmin transmission error for a low-cost strain-wave reducer. Measure it |
+| 2 | J2 elbow reducer transmission error (strain-wave 50:1) | fixed | 0.0192 deg | 0.060 | 22% | assumed: 2 arcmin transmission error for a low-cost strain-wave reducer. Measure it |
+| 3 | Part shift on vacuum release | random | 0.0300 mm | 0.042 | 11% | assumed: part shift when vacuum releases |
+| 4 | Link and printed-joint bending under hose load | fixed | 0.0167 mm | 0.024 | 3% | tube: computed F*L^3/(3EI) = 0.0089 mm; joints: assumed tip deflection from the PETG joints under the same load |
+| 5 | Top camera residual after ChArUco calibration | fixed | 0.0166 mm | 0.023 | 3% | assumed after calibration; metrology/charuco_calib.py reports the real value |
+| 6 | Residual vibration at placement | random | 0.0141 mm | 0.020 | 2% | assumed residual vibration after the 150 ms settle (hardware doc) |
+| 7 | Top camera height mismatch (homography plane vs board top) | fixed | 0.0122 mm | 0.017 | 2% | assumed 10% board-thickness tolerance once the plane is matched |
+| 8 | Top camera fiducial location | session | 0.0110 mm | 0.016 | 1% | assumed sub-pixel fiducial centroid |
+| 9 | J1 base reducer lost motion (strain-wave 50:1) | direction | 0.0033 deg | 0.015 | 1% | Harmonic Drive CSF-ULW brochure, size 11, ratio 50: lost motion about 2 arcmin (clones claim < 20 arcsec backlash) |
+| 10 | Kinematic calibration uncertainty (zeros, links, base offset) | fixed | fit covariance | 0.014 | 1% | predicted for 25 planned poses; tip measurement assumed: top camera reading a target on the nozzle after ChArUco calibration |
+| 11 | Part rotation error at the part's end (0805) | random | 0.0087 mm | 0.012 | 1% | assumed part-angle measurement noise |
+| 12 | Thermal growth of printed parts | session | 0.0118 mm | 0.012 | 1% | typical PETG datasheet value |
+| 13 | Bottom camera part location | random | 0.0075 mm | 0.011 | 1% | assumed part-outline centroid noise |
+| 14 | Nozzle axis position in the bottom image | fixed | 0.0075 mm | 0.011 | 1% | assumed part-outline centroid noise |
+| 15 | J2 elbow reducer lost motion (strain-wave 50:1) | direction | 0.0033 deg | 0.010 | 1% | Harmonic Drive CSF-ULW brochure, size 11, ratio 50: lost motion about 2 arcmin (clones claim < 20 arcsec backlash) |
+| 16 | Nozzle runout | random | 0.0071 mm | 0.010 | 1% | assumed after runout compensation |
+| 17 | J1 base stepper position error (+/-5% of a full step) | fixed | 0.0010 deg | 0.005 | 0% | typical hybrid-stepper datasheet: +/-5% of a full step, no load |
+| 18 | J2 elbow stepper position error (+/-5% of a full step) | fixed | 0.0010 deg | 0.003 | 0% | typical hybrid-stepper datasheet: +/-5% of a full step, no load |
+| 19 | J1 base step resolution | fixed | 0.0006 deg | 0.003 | 0% | assumed TMC2209 setting |
+| 20 | J2 elbow step resolution | fixed | 0.0006 deg | 0.002 | 0% | assumed TMC2209 setting |
+| 21 | Bottom camera mm-per-pixel error | random | 0.0006 mm | 0.001 | 0% | assumed after calibration |
+| 22 | J1 base load deflection (hose drag, friction) | direction | 0.0001 deg | 0.001 | 0% | assumed: vacuum hose and wiring drag plus bearing friction. Measure it |
+
+**Fix first:**
+
+- **J1 base reducer transmission error (strain-wave 50:1)** (48%). Measure: Turn the input in steps over a full output revolution against an output-side reference (camera on a target on the link) and log the error. Fix: Per-joint error map from that measurement, or an output-side reference encoder.
+- **J2 elbow reducer transmission error (strain-wave 50:1)** (22%). Measure: Turn the input in steps over a full output revolution against an output-side reference (camera on a target on the link) and log the error. Fix: Per-joint error map from that measurement, or an output-side reference encoder.
+- **Part shift on vacuum release** (11%). Measure: Place onto tacky tape, compare the part before and after release with the top camera. Fix: Lower placement height, controlled blow-off.
 
 ## Board distance from the base
 
-Scenario: + closed loop on linearized AS5048A at both planar joints. The board is moved along its current direction from the base. J1's error at the nozzle grows with distance from the base; J2's and the cameras' don't.
+Scenario: Option D: 50:1 strain-wave reducer, open loop, encoders check for missed steps. The board is moved along its current direction from the base. J1's error at the nozzle grows with distance from the base; J2's and the cameras' don't.
 
 | Board centre radius (mm) | Accuracy RMS (mm) |
 | --- | --- |
-| 100 | 0.200 |
-| 130 | 0.211 |
-| 160 | 0.223 |
-| 190 | 0.237 |
-| 220 | 0.251 |
-| 250 | 0.267 |
-| 280 | 0.283 |
+| 100 | 0.103 |
+| 130 | 0.108 |
+| 160 | 0.114 |
+| 190 | 0.120 |
+| 220 | 0.127 |
+| 250 | 0.134 |
+| 280 | 0.142 |
 
 ## Assumptions to replace with measurements
 
@@ -274,6 +331,4 @@ Edit these in the config once measured, and change each source to say how.
 | `nozzle.runout_after_mm` | 0.01 | assumed after runout compensation |
 | `process.release_slip_mm` | 0.03 | assumed: part shift when vacuum releases |
 | `process.settle_amplitude_mm` | 0.02 | assumed residual vibration after the 150 ms settle (hardware doc) |
-| `calibration.residual_zero_deg` | 0.02 | assumed until metrology/kinematic_fit.py reports real standard errors |
-| `calibration.residual_link_mm` | 0.05 | assumed until metrology/kinematic_fit.py reports real standard errors |
-| `calibration.residual_base_mm` | 0.05 | assumed until metrology/kinematic_fit.py reports real standard errors |
+| `calibration.tip_measurement_sigma_mm` | 0.03 | assumed: top camera reading a target on the nozzle after ChArUco calibration |

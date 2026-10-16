@@ -309,6 +309,26 @@ def tip_covariance(geom, q_deg, names, cov):
     return np.einsum("nip,pq,njq->nij", G, np.asarray(cov, dtype=float), G)
 
 
+def predicted_fit_covariance(geom, q_deg, sigma_mm, fit_scale=None):
+    """Parameter covariance a fit WOULD have if these poses are measured with
+    per-axis noise sigma_mm: sigma^2 (J^T J)^-1. Uses the same rule as
+    fit_geometry for whether the joint scales are fitted."""
+    q = np.asarray(q_deg, dtype=float)
+    if fit_scale is None:
+        fit_scale = len(q) >= 16 and bool(np.all(np.ptp(q, axis=0) >= 30.0))
+    free = np.arange(8) if fit_scale else np.arange(6)
+    v0 = geom.to_vector()
+
+    def tip(x):
+        v = v0.copy()
+        v[free] = x
+        return forward(ArmGeometry.from_vector(v), q).ravel()
+
+    x0 = v0[free]
+    J = _numeric_jacobian(tip, x0, tip(x0))
+    return [PARAM_NAMES[i] for i in free], sigma_mm ** 2 * np.linalg.inv(J.T @ J)
+
+
 def plan_calibration_poses(geom, board_mm, n=25, margin_mm=15.0, elbow=1, seed=0):
     """Spread n target poses over the board area plus a margin (more spread =
     better-determined link lengths and zeros), keeping only reachable ones.

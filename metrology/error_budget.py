@@ -38,7 +38,8 @@ from pathlib import Path
 
 import numpy as np
 
-from metrology.scara import ArmGeometry, inverse, local_directions, tip_covariance
+from metrology.scara import (ArmGeometry, inverse, local_directions, plan_calibration_poses,
+                             predicted_fit_covariance, tip_covariance)
 
 DEFAULT_CONFIG = Path(__file__).with_name("budget_config.json")
 SQRT3, SQRT12 = math.sqrt(3.0), math.sqrt(12.0)
@@ -108,6 +109,14 @@ class Term:
 
 
 def _joint_terms(c, raw, j):
+    """Joint-angle error terms, in degrees at the joint (output side).
+
+    Reduction ratio N divides everything that happens on the motor side
+    (step size, step error, motor-shaft encoder) and multiplies the motor's
+    holding stiffness by N^2. The reducer adds its own stiffness (in series),
+    lost motion and transmission error on the output side. Closed loop on a
+    motor-shaft encoder corrects the motor angle only; closed loop on an
+    output-side encoder corrects everything up to that encoder's accuracy."""
     J = c["joints"][j]
     enc = J["encoder"]
     n = float(J["gear_ratio"])
@@ -119,57 +128,73 @@ def _joint_terms(c, raw, j):
     calibrated = c["calibration"]["kinematic"]
     one_sided = c["approach"] == "unidirectional"
     residual = c["unidirectional_residual_frac"] if (one_sided and calibrated) else 1.0
+    closed = enc["present"] and enc["closed_loop"]
+    at_output = enc.get("location", "motor") == "output"
+    enc_div = 1.0 if at_output else n
+    k_red = float(J.get("reducer_stiffness_nm_per_rad") or 0.0)        # 0 = rigid
+    k_motor = J["holding_torque_nm"] * J["hold_current_frac"] * (math.pi / 2) / math.radians(full_step)
     terms = []
 
-    if enc["present"] and enc["closed_loop"]:
+    if closed:
         inl = enc["linearized_residual_deg"] if enc["linearized"] else enc["inl_deg"]
+        count = 360.0 / 2 ** enc["bits"] / enc_div
         terms += [
-            Term(j + "_enc_inl", "%s encoder non-linearity" % lab, kind, inl / n / SQRT3, "fixed",
+            Term(j + "_enc_inl", "%s encoder non-linearity (%s shaft)" % (lab, "output" if at_output else "motor"),
+                 kind, inl / enc_div / SQRT3, "fixed",
                  src("encoder.linearized_residual_deg" if enc["linearized"] else "encoder.inl_deg"),
                  "Rotate the joint through its range against a reference (camera on the ChArUco grid, or "
                  "averaged full-step positions) and log encoder angle vs reference angle.",
                  "Per-unit lookup-table linearization in firmware; centre the magnet within the datasheet limits."),
-            Term(j + "_enc_quant", "%s encoder resolution" % lab, kind, 360.0 / 2 ** enc["bits"] / n / SQRT12, "fixed",
+            Term(j + "_enc_quant", "%s encoder resolution" % lab, kind, count / SQRT12, "fixed",
                  src("encoder.bits"), "Fixed by the encoder's bit count.", "Reduction between joint and encoder shaft."),
-            Term(j + "_deadband", "%s closed-loop settling band (one microstep)" % lab, kind, micro / SQRT3, "random",
+            Term(j + "_deadband", "%s closed-loop settling band" % lab, kind, max(micro, count) / SQRT3, "random",
                  src("microsteps"), "Log encoder error at standstill after each move.",
                  "Finer microstepping, or settle on the encoder count rather than the step count."),
         ]
+        stiffness = None if at_output else (k_red or None)
     else:
-        k_motor = J["holding_torque_nm"] * J["hold_current_frac"] * (math.pi / 2) / math.radians(full_step)
-        deflection = math.degrees(J["load_torque_nm"] / (k_motor * n * n))
         terms += [
             Term(j + "_step_quant", "%s step resolution" % lab, kind, micro / SQRT12, "fixed",
                  src("microsteps"), "Fixed by steps/rev, microsteps and gear ratio.",
-                 "Reduction (belt or gearbox) between motor and joint."),
+                 "Reduction between motor and joint."),
             Term(j + "_step_accuracy", "%s stepper position error (+/-%g%% of a full step)" % (lab, J["step_accuracy_pct"]),
                  kind, J["step_accuracy_pct"] / 100.0 * full_step / n / SQRT3, "fixed", src("step_accuracy_pct"),
                  "Step through 4 full steps in microsteps and read the real angle (encoder or camera); repeat at a few angles.",
                  "Closed loop on a linearized encoder, or reduction."),
-            Term(j + "_load_deflection", "%s load deflection (hose drag, friction)" % lab, kind,
-                 deflection * residual, "direction", src("load_torque_nm"),
-                 "Push the nozzle tangentially with a force gauge at standstill and read the angle change; "
-                 "hang the hose and measure its pull.",
-                 "Closed loop, more hold current, reduction (stiffness grows with ratio squared), lighter hose routing."),
         ]
+        k_joint = k_motor * n * n
+        stiffness = 1.0 / (1.0 / k_joint + 1.0 / k_red) if k_red else k_joint
 
-    terms.append(Term(j + "_backlash", "%s backlash in the coupling" % lab, kind,
-                      J["backlash_deg"] / 2.0 * residual, "direction", src("backlash_deg"),
-                      "Approach the same target from both sides and compare (the ISO test's vAP does this).",
-                      "Approach every target from one side; tighter coupling; preload."))
+    if stiffness:
+        terms.append(Term(j + "_load_deflection", "%s load deflection (hose drag, friction)" % lab, kind,
+                          math.degrees(J["load_torque_nm"] / stiffness) * residual, "direction", src("load_torque_nm"),
+                          "Push the nozzle tangentially with a force gauge at standstill and read the angle change; "
+                          "hang the hose and measure its pull.",
+                          "Reduction (motor stiffness grows with ratio squared), a stiffer reducer, closed loop, lighter hose routing."))
 
-    if calibrated and c["calibration"].get("fit"):
-        return terms + _homing_term(J, j, kind, lab, src)   # zero offsets are inside the fit covariance term
-    if calibrated:
-        zero = c["calibration"]["residual_zero_deg"]
-        zsrc = source_of(raw, "calibration.residual_zero_deg")
-    else:
-        zero = J["zero_uncertainty_deg"] / SQRT3
-        zsrc = src("zero_uncertainty_deg")
-    terms.append(Term(j + "_zero", "%s zero offset" % lab, kind, zero, "fixed", zsrc,
-                      "Kinematic fit (metrology/kinematic_fit.py) estimates it with a standard error.",
-                      "Kinematic calibration."))
+    if not (closed and at_output):
+        if J["backlash_deg"]:
+            terms.append(Term(j + "_backlash", "%s backlash in the coupling" % lab, kind,
+                              J["backlash_deg"] / 2.0 * residual, "direction", src("backlash_deg"),
+                              "Approach the same target from both sides and compare (the ISO test's vAP does this).",
+                              "Approach every target from one side; clamp or bolt the link to the shaft or flange."))
+        if J.get("reducer_backlash_deg"):
+            terms.append(Term(j + "_reducer_lost_motion", "%s reducer lost motion (%s)" % (lab, J.get("reducer", "reducer")),
+                              kind, J["reducer_backlash_deg"] / 2.0 * residual, "direction", src("reducer_backlash_deg"),
+                              "Lock the motor, torque the output both ways at a few % of rated torque, read the angle.",
+                              "Approach every target from one side."))
+        if J.get("reducer_transmission_error_deg"):
+            terms.append(Term(j + "_reducer_te", "%s reducer transmission error (%s)" % (lab, J.get("reducer", "reducer")),
+                              kind, J["reducer_transmission_error_deg"] / SQRT3, "fixed", src("reducer_transmission_error_deg"),
+                              "Turn the input in steps over a full output revolution against an output-side reference "
+                              "(camera on a target on the link) and log the error.",
+                              "Per-joint error map from that measurement, or an output-side reference encoder."))
 
+    if not calibrated:
+        terms.append(Term(j + "_zero", "%s zero offset" % lab, kind, J["zero_uncertainty_deg"] / SQRT3, "fixed",
+                          src("zero_uncertainty_deg"),
+                          "Kinematic fit (metrology/kinematic_fit.py) estimates it with a standard error.",
+                          "Kinematic calibration."))
     return terms + _homing_term(J, j, kind, lab, src)
 
 
@@ -187,20 +212,23 @@ def build_terms(c, raw):
     L, cal = c["links"], c["calibration"]
     ct, cb, nz, pr, pk = c["camera_top"], c["camera_bottom"], c["nozzle"], c["process"], c["package"]
 
-    if cal["kinematic"] and cal.get("fit"):
+    if cal["kinematic"]:
+        if cal.get("fit"):
+            names, cov, fsrc = cal["fit"]["names"], np.asarray(cal["fit"]["cov"], dtype=float), source_of(raw, "calibration.fit")
+        else:
+            # Not measured yet: the covariance the planned fit would have.
+            g = c["geometry"]
+            geom = ArmGeometry(tuple(g["base_offset_mm"]), g["l1_mm"], g["l2_mm"],
+                               tuple(g.get("zero_deg", (0.0, 0.0))), tuple(g.get("scale", (1.0, 1.0))))
+            _, q = plan_calibration_poses(geom, tuple(g["board_mm"]), n=cal["planned_poses"],
+                                          margin_mm=cal["pose_margin_mm"], elbow=g["elbow"])
+            names, cov = predicted_fit_covariance(geom, q, cal["tip_measurement_sigma_mm"])
+            fsrc = "predicted for %d planned poses; tip measurement %s" % (
+                len(q), source_of(raw, "calibration.tip_measurement_sigma_mm"))
         terms.append(Term("kinematic_fit", "Kinematic calibration uncertainty (zeros, links, base offset)", "fitcov", 0.0,
-                          "fixed", source_of(raw, "calibration.fit"),
-                          "The fit's parameter covariance, carried to each board point.",
+                          "fixed", fsrc, "The fit's parameter covariance, carried to each board point.",
                           "More, wider-spread calibration poses; a better tip measurement.",
-                          extra={"names": cal["fit"]["names"], "cov": np.asarray(cal["fit"]["cov"], dtype=float)}))
-    elif cal["kinematic"]:
-        for k in ("link1", "link2"):
-            terms.append(Term(k + "_length", "%s length" % k.replace("link", "Link "), k, cal["residual_link_mm"], "fixed",
-                              source_of(raw, "calibration.residual_link_mm"),
-                              "Kinematic fit standard error.", "More, wider-spread calibration poses."))
-        terms.append(Term("base_registration", "Arm base position vs board", "xy", cal["residual_base_mm"], "fixed",
-                          source_of(raw, "calibration.residual_base_mm"),
-                          "Kinematic fit standard error.", "More, wider-spread calibration poses."))
+                          extra={"names": names, "cov": cov}))
     else:
         for k in ("link1", "link2"):
             terms.append(Term(k + "_length", "%s length" % k.replace("link", "Link "), k, L["length_tolerance_mm"] / SQRT3,
@@ -415,20 +443,29 @@ def run(config_path=DEFAULT_CONFIG, overrides=(), arm_calibration=None):
             set_value(raw, "geometry." + key, g[key], label)
         set_value(raw, "calibration.fit", {"names": fit["fitted_parameters"], "cov": fit["covariance"]}, label)
 
-    results = []
+    results, states = [], {}
     cumulative = copy.deepcopy(raw)
     for sc in raw.get("scenarios") or [{"name": "Config as given", "set": {}}]:
+        if sc.get("from"):
+            cumulative = copy.deepcopy(states[sc["from"]])   # a design option branches off an earlier step
         for dotted, value in sc.get("set", {}).items():
-            set_value(cumulative, dotted, value, "scenario: %s" % sc["name"])
+            if _is_leaf(value):
+                set_value(cumulative, dotted, value["value"], value.get("source") or "scenario: %s" % sc["name"])
+            else:
+                set_value(cumulative, dotted, value, "scenario: %s" % sc["name"])
+        states[sc["name"]] = copy.deepcopy(cumulative)
         c = unwrap(cumulative)
         res = evaluate(c, build_terms(c, cumulative))
         res["name"] = sc["name"]
         res["hypothetical"] = bool(sc.get("hypothetical"))
+        res["option"] = bool(sc.get("from"))
+        res["recommended"] = bool(sc.get("recommended"))
         res["_cfg"], res["_raw"] = c, copy.deepcopy(cumulative)
         results.append(res)
 
     real = [r for r in results if not r["hypothetical"]]
-    best = real[-1] if real else results[-1]
+    recommended = [r for r in results if r["recommended"]]
+    best = recommended[0] if recommended else (real[-1] if real else results[-1])
     sweep = distance_sweep(best["_cfg"], best["_raw"])
     assumed = collect_assumed(raw)
     base_c = unwrap(raw)
@@ -463,13 +500,16 @@ def to_markdown(rep):
              "",
              "Targets (hardware_plan_v3, section 9): accuracy < %s mm RMS, repeatability < %s mm std. "
              "Errors are evaluated at the worst point on the board, for an %s." % (t["accuracy_rms_mm"], t["repeatability_std_mm"], rep["package"]["name"]),
-             "", "## Scenarios (each adds to the one above)", "",
+             "", "## Scenarios", "",
+             "Steps without a letter each add to the step above. Lettered options are alternative joint drives, "
+             "each applied on top of the step it branches from.", "",
              "| Scenario | Accuracy RMS (mm) | 95% radial (mm) | Repeatability std (mm) | ISO RP (mm) | Meets targets |",
              "| --- | --- | --- | --- | --- | --- |"]
     for r in rep["scenarios"]:
         ok = ("yes" if r["meets_accuracy_target"] else "no") + " / " + ("yes" if r["meets_repeatability_target"] else "no")
-        lines.append("| %s%s | %s | %s | %s | %s | %s |" % (
-            r["name"], " *(hypothetical)*" if r["hypothetical"] else "", _f(r["accuracy_rms_mm"]),
+        lines.append("| %s%s%s | %s | %s | %s | %s | %s |" % (
+            r["name"], " *(hypothetical)*" if r["hypothetical"] else "", " **(recommended)**" if r["recommended"] else "",
+            _f(r["accuracy_rms_mm"]),
             _f(r["accuracy_95_radial_mm"]), _f(r["repeatability_std_mm"]), _f(r["iso_rp_mm"]), ok))
     lines += ["", "\"Meets targets\" is accuracy / repeatability. ISO RP = mean distance + 3 std of distance, from the "
               "cycle-to-cycle terms only.", ""]

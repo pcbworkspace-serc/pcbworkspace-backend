@@ -40,9 +40,40 @@ def test_shares_add_up_and_terms_are_ranked(default_report):
         assert tips == sorted(tips, reverse=True)
 
 
-def test_each_scenario_lowers_predicted_accuracy_error(default_report):
-    acc = [sc["accuracy_rms_mm"] for sc in default_report["scenarios"]]
+def _scenario(report, prefix):
+    return next(sc for sc in report["scenarios"] if sc["name"].startswith(prefix))
+
+
+def test_each_step_lowers_error_and_options_branch_from_the_last_step(default_report):
+    ladder = [sc for sc in default_report["scenarios"] if not sc["option"]]
+    acc = [sc["accuracy_rms_mm"] for sc in ladder]
     assert all(b < a for a, b in zip(acc, acc[1:])), acc
+    options = [sc for sc in default_report["scenarios"] if sc["option"]]
+    assert len(options) == 4 and all(o["accuracy_rms_mm"] < acc[-1] for o in options)
+    recommended = [o for o in options if o["recommended"]]
+    assert len(recommended) == 1
+    assert recommended[0]["accuracy_rms_mm"] == min(o["accuracy_rms_mm"] for o in options)
+
+
+def test_reduction_divides_motor_side_errors_and_stiffens_the_joint(default_report):
+    direct = _terms(default_report["scenarios"][2])
+    reduced = _terms(_scenario(default_report, "Option D"))
+    assert reduced["j1_step_accuracy"]["input_sigma"] == pytest.approx(direct["j1_step_accuracy"]["input_sigma"] / 50)
+    assert reduced["j1_load_deflection"]["input_sigma"] < direct["j1_load_deflection"]["input_sigma"] / 100
+    assert "j1_reducer_te" in reduced and "j1_reducer_te" not in direct
+
+
+def test_output_side_encoder_is_not_divided_by_the_ratio(default_report):
+    on_output = _terms(_scenario(default_report, "Option C"))      # belt 4:1, encoder on the joint
+    direct = _terms(_scenario(default_report, "Option A"))         # direct drive, encoder on the motor
+    assert on_output["j1_enc_inl"]["input_sigma"] == pytest.approx(direct["j1_enc_inl"]["input_sigma"])
+    assert "j1_reducer_te" not in on_output and "j1_load_deflection" not in on_output   # the loop corrects them
+
+
+def test_calibration_term_is_predicted_until_measured(default_report):
+    fit = _terms(default_report["scenarios"][1])["kinematic_fit"]
+    assert fit["source"].startswith("predicted for 25 planned poses")
+    assert 0 < fit["tip_rms_mm"] < 0.05
 
 
 def test_one_sided_approach_takes_backlash_out_of_repeatability(default_report):

@@ -7,7 +7,7 @@ their output. Only measurements from the assembled arm can replace them.
 
 | Step | Tool | Needs hardware? | Output |
 | --- | --- | --- | --- |
-| A. Error budget | `python -m metrology.error_budget` | No | [ERROR_BUDGET.md](ERROR_BUDGET.md): predicted accuracy, ranked error sources, what to measure |
+| A. Error budget | `python -m metrology.error_budget` | No | [ERROR_BUDGET.md](ERROR_BUDGET.md): predicted accuracy, ranked error sources, what to measure; [ADR-001](ADR-001-joint-drive.md): the joint drive it led to |
 | B1. Camera intrinsics | `python -m metrology.charuco_calib intrinsics photos/ ...` | Camera + printed target | Camera matrix, lens distortion, reprojection error (in-sample and held-out) |
 | B2. Board plane | `python -m metrology.charuco_calib homography plane.jpg ...` | Camera + target | POST body for `/calibration/save`, with distortion correction and residuals |
 | B3. Arm geometry | `python -m metrology.kinematic_fit plan / fit` | Assembled arm | `arm_calibration.json`: link lengths, base offset, joint zeros, with standard errors |
@@ -29,15 +29,15 @@ datasheets and stated assumptions.
   0.8 mm RMS. Approaching every target from the same side brings that to about
   0.4 mm.
 - **The AS5048A is not an accuracy fix on its own.** Its datasheet INL is ±0.8°
-  at best magnet placement. It reaches 0.05° only after per-unit linearization.
-  Even then, closed loop on both planar joints predicts about 0.26 mm RMS. The
-  BOM puts the encoders on base and shoulder, not on the elbow.
-- **No scenario meets 0.15 mm with the default inputs.** Adding a
-  hypothetical 10:1 reduction on both planar joints gets to 0.175 mm. A
-  tighter kinematic calibration also helps: a simulated 25-pose fit at
-  0.02 mm measurement noise takes the reduction scenario to about 0.09 mm.
-  Run the budget with your measured `arm_calibration.json` before deciding
-  on hardware.
+  at best magnet placement. It reaches 0.05° only after per-unit linearization,
+  and even then closed loop on direct drive predicts 0.21 mm RMS. The BOM puts
+  the encoders on base and shoulder, not on the elbow.
+- **Decision: 50:1 strain-wave reducers on J1 and J2, open loop**
+  ([ADR-001](ADR-001-joint-drive.md)). Of four drive options, this is the only
+  one predicted to meet both targets: 0.129 mm RMS and 0.036 mm repeatability.
+  The margin is thin, and it rests on the reducer's transmission error
+  (assumed 2 arcmin). The ADR gates the second purchase on measuring the first
+  reducer.
 
 Every assumed input is listed at the bottom of the report with its path in
 [budget_config.json](budget_config.json). Measure it, edit the value, change the
