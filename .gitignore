@@ -5,3 +5,5 @@ data_capture/
 .pytest_cache/
 calibration.json
 
+vision_eval_report*.json
+vision_eval_split*.json

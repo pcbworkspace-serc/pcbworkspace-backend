@@ -54,3 +54,40 @@ def test_capture_stats(tmp_path):
     stats = dc.capture_stats(base_dir=base)
     assert stats["align"] == {"total_captured": 2, "labeled": 1, "unlabeled": 1}
     assert stats["validate"] == {"total_captured": 0, "labeled": 0, "unlabeled": 0}
+
+
+def test_save_capture_records_board_session_and_context(tmp_path):
+    base = str(tmp_path)
+    cid = dc.save_capture("detect", _img(), {"boxes": []}, base_dir=base,
+                          board_id=" B1 ", session_id="S1", context={"px_per_mm": 12.5})
+    import json
+    data = json.loads((tmp_path / "detect" / f"{cid}.json").read_text())
+    assert (data["board_id"], data["session_id"]) == ("B1", "S1")
+    assert data["capture_context"] == {"px_per_mm": 12.5}
+    assert data["label_source"] is None and data["labeler"] is None
+
+
+def test_record_feedback_records_who_labeled(tmp_path):
+    base = str(tmp_path)
+    cid = dc.save_capture("align", _img(), {}, base_dir=base)
+    updated = dc.record_feedback("align", cid, {"delta_theta_deg": 1.0}, base_dir=base,
+                                 label_source="human", labeler="jd", board_id="B9", session_id="S2")
+    assert (updated["label_source"], updated["labeler"]) == ("human", "jd")
+    assert (updated["board_id"], updated["session_id"]) == ("B9", "S2")
+
+
+def test_record_feedback_rejects_bad_provenance(tmp_path):
+    import pytest
+    base = str(tmp_path)
+    cid = dc.save_capture("align", _img(), {}, base_dir=base, board_id="B1")
+    with pytest.raises(ValueError, match="labeler"):
+        dc.record_feedback("align", cid, {}, base_dir=base, label_source="human")
+    with pytest.raises(ValueError, match="label_source"):
+        dc.record_feedback("align", cid, {}, base_dir=base, label_source="intern")
+    with pytest.raises(ValueError, match="conflicts"):
+        dc.record_feedback("align", cid, {}, base_dir=base, label_source="model", board_id="B2")
+
+
+def test_load_labeled_dataset_does_not_create_folders(tmp_path):
+    assert dc.load_labeled_dataset("detect", base_dir=str(tmp_path)) == []
+    assert not (tmp_path / "detect").exists()
