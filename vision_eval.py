@@ -698,15 +698,17 @@ def evaluate(capture_dir, detectors=None, aligners=None, cfg=None, trained_on=No
     # Same image under two groups = the group ids are wrong, so the split
     # can't be trusted. Near-duplicates across splits are only flagged:
     # two copies of one board design can legitimately look alike.
-    images, digests, hashes = {}, {}, {}
+    images, digests, hashes, eval_digest = {}, {}, {}, {}
     eval_keys = {r["_key"] for r in test_eval}
     for rec in records:
         if rec["_key"] not in group_of or not Path(rec["image_path"]).is_file():
             continue
         img = _load_image(rec)
+        digest = _pixel_digest(img)
         if rec["_key"] in eval_keys:
             images[rec["_key"]] = img
-        digests.setdefault(_pixel_digest(img), set()).add(group_of[rec["_key"]])
+            eval_digest[rec["_key"]] = digest
+        digests.setdefault(digest, set()).add(group_of[rec["_key"]])
         hashes[rec["_key"]] = _dhash(img)
     dupes = [f"one image is filed under groups {sorted(g)}" for g in digests.values() if len(g) > 1]
     if dupes:
@@ -717,6 +719,18 @@ def evaluate(capture_dir, detectors=None, aligners=None, cfg=None, trained_on=No
         for ok in sorted(k for k in hashes if k not in test_keys):
             if bin(hashes[tk] ^ hashes[ok]).count("1") <= cfg.near_duplicate_max_hamming:
                 near.append([tk, ok])
+
+    # One frame captured twice in a group (the frontend re-running detection
+    # with the other method, say) and labeled twice is still one frame: keep
+    # its most recent label so it isn't counted twice.
+    latest = {}
+    for rec in test_eval:
+        k = (rec["kind"], group_of[rec["_key"]], eval_digest[rec["_key"]])
+        if k not in latest or (rec.get("labeled_at") or 0) > (latest[k].get("labeled_at") or 0):
+            latest[k] = rec
+    kept = {id(r) for r in latest.values()}
+    n_collapsed = len(test_eval) - len(kept)
+    test_eval = [r for r in test_eval if id(r) in kept]
 
     test_groups = sorted({group_of[r["_key"]] for r in test})
     report = {
@@ -739,6 +753,7 @@ def evaluate(capture_dir, detectors=None, aligners=None, cfg=None, trained_on=No
             "n_test_groups": len(test_groups),
             "test_groups": test_groups,
             "n_test_frames_evaluated": len(test_eval),
+            "n_repeat_captures_collapsed": n_collapsed,
             "n_reserved_frames": sum(1 for r in records if r["_key"] in group_of) - len(test),
             "n_excluded_no_board_or_session_id": len(ungrouped),
             "trained_on_manifest_checked": bool(trained_on),

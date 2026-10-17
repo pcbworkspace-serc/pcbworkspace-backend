@@ -268,6 +268,23 @@ def test_held_out_groups_stay_held_out_as_data_grows():
             assert after[group_of[rec["_key"]]] == "test"
 
 
+def test_a_frame_captured_twice_in_one_group_counts_once(tmp_path):
+    """Re-running detection on the same frame saves a second, identical
+    capture. If both get labeled, only the most recent label counts."""
+    img = _rect_image(900)
+    first = _add(tmp_path, "align", img, {"delta_theta_deg": 5.0}, board="B1")
+    second = _add(tmp_path, "align", img, {"delta_theta_deg": 3.0}, board="B1")
+    for cid, t in ((first, 100.0), (second, 200.0)):  # pin label order; clock resolution varies
+        path = tmp_path / "align" / f"{cid}.json"
+        data = json.loads(path.read_text())
+        data["labeled_at"] = t
+        path.write_text(json.dumps(data))
+    report = ve.evaluate(tmp_path, cfg=_cfg(), aligners={"x": lambda img: {"available": True, "delta_theta_deg": 0.0}})
+    assert report["split"]["n_repeat_captures_collapsed"] == 1
+    assert report["alignment"]["n_frames"] == 1
+    assert report["alignment"]["methods"]["x"]["angle_abs_error_deg"]["mean"]["value"] == 3.0
+
+
 def test_frames_without_board_or_session_are_excluded_and_counted(tmp_path):
     _add(tmp_path, "align", _rect_image(9), {"delta_theta_deg": 1.0}, board="B1")
     _add(tmp_path, "align", _rect_image(10), {"delta_theta_deg": 1.0})
