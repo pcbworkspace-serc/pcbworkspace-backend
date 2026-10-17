@@ -2,7 +2,7 @@
 flask_server.py — PCBWorkspace SERC backend (with eager YOLO preload + calibration)
 """
 
-import io, time, json, os, threading, math
+import io, time, json, os, threading
 from pathlib import Path
 from flask import Flask, request, jsonify
 
@@ -43,7 +43,7 @@ CAPTURE_DIR = os.environ.get("CAPTURE_DIR", data_capture.DEFAULT_CAPTURE_DIR)
 
 CHECKPOINT_PATH = "best.pt"
 YOLO_WEIGHTS_PATH = "yolov8_pcb.pt"
-MODEL_NAME = "MobileNetV3-Small (multi-label, FPIC, paper mAP 0.636)"
+MODEL_NAME = "MobileNetV3-Small (multi-label, trained on FPIC)"
 HYBRID_NAME = "YOLOv8n (box proposer) + MobileNetV3-Small (classifier)"
 
 CALIBRATION_PATH = "calibration.json"
@@ -254,6 +254,27 @@ def _request_to_pil():
         return None
 
 
+def _maybe_capture(kind, img, result, px_per_mm=None):
+    """Saves the frame + prediction for later labeling when capture is on.
+    board_id / session_id come from the request so vision_eval.py can split
+    held-out data by board instead of by frame."""
+    if not CAPTURE_TRAINING_DATA:
+        return
+    def field(name):
+        return (request.form.get(name) or request.args.get(name) or "").strip() or None
+    context = {"image_size": list(img.size)}
+    # camera | upload | sample | scene_render, as the frontend reports it;
+    # vision_eval.py never evaluates renders or bundled dataset samples
+    if field("frame_source"):
+        context["frame_source"] = field("frame_source")
+    if px_per_mm:
+        context["px_per_mm"] = px_per_mm
+    result["capture_id"] = data_capture.save_capture(
+        kind, img, result, base_dir=CAPTURE_DIR,
+        board_id=field("board_id"), session_id=field("session_id"), context=context,
+    )
+
+
 _ensure_model()
 _ensure_jepa_heads()
 
@@ -288,11 +309,27 @@ def nn_status():
         "class_names": CLASS_NAMES,
         "device": _device,
         "trained": _model_loaded,
-        "metrics_from_paper": {
-            "mAP": 0.636,
-            "macro_f1_at_0.5": 0.517,
-            "macro_precision_at_0.5": 0.782,
-            "macro_recall_at_0.5": 0.423,
+        # Only one set of detection numbers exists, and it is not SERC's:
+        # it's the figure the FPIC paper reports on the public FPIC dataset.
+        # Keep it labeled as exactly that, next to an explicit statement
+        # that no measurement on SERC boards exists yet, so nobody reads it
+        # as SERC performance. vision_eval.py produces the SERC number once
+        # human-labeled held-out captures exist.
+        "detection_metrics": {
+            "serc_boards": {
+                "measured": False,
+                "status": "No detection measurement on SERC boards exists yet.",
+                "how_to_measure": "python vision_eval.py --capture-dir <dir> on human-labeled, held-out /nn/feedback captures",
+            },
+            "fpic_paper_reference": {
+                "source": "published figure from the FPIC paper, not measured by SERC",
+                "dataset": "FPIC (public PCB component dataset), not SERC boards or SERC cameras",
+                "measured_by_serc": False,
+                "mAP": 0.636,
+                "macro_f1_at_0.5": 0.517,
+                "macro_precision_at_0.5": 0.782,
+                "macro_recall_at_0.5": 0.423,
+            },
         },
         "methods": {
             "sliding_window": {
@@ -378,6 +415,7 @@ def nn_detect_boxes():
     out = model.detect_boxes_sliding(img)
     out["model"] = MODEL_NAME
     out["inference_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+    _maybe_capture("detect", img, out)
     return jsonify(out)
 
 
@@ -408,17 +446,12 @@ def nn_detect_boxes_yolo():
         }), 503
     out["model"] = HYBRID_NAME
     out["inference_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+    _maybe_capture("detect", img, out)
     return jsonify(out)
 
 
 def _run_trained_align(img, align_cnn, align_head, px_per_mm):
-    resized = img.resize((jepa_heads.WIN_SIZE, jepa_heads.WIN_SIZE))
-    x = jepa_heads._to_tensor(resized).unsqueeze(0)
-    with torch.no_grad():
-        out = align_head(align_cnn(x))[0]
-    theta = math.degrees(math.atan2(float(out[0]), float(out[1])))
-    dx_px = float(out[2]) * jepa_heads.MAX_OFFSET_PX
-    dy_px = float(out[3]) * jepa_heads.MAX_OFFSET_PX
+    theta, dx_px, dy_px = jepa_heads.predict_alignment(img, align_cnn, align_head)
     result = {
         "delta_theta_deg": round(theta, 2),
         "delta_x_px": round(dx_px, 2),
@@ -461,8 +494,7 @@ def nn_align():
         result = vision_classical.estimate_alignment(img, px_per_mm=px_per_mm)
 
     result["inference_ms"] = round((time.perf_counter() - t0) * 1000, 1)
-    if CAPTURE_TRAINING_DATA:
-        result["capture_id"] = data_capture.save_capture("align", img, result, base_dir=CAPTURE_DIR)
+    _maybe_capture("align", img, result, px_per_mm=px_per_mm)
     return jsonify(result)
 
 
@@ -511,27 +543,38 @@ def nn_validate():
             result = vision_classical.validate_placement(img)
 
     result["inference_ms"] = round((time.perf_counter() - t0) * 1000, 1)
-    if CAPTURE_TRAINING_DATA:
-        result["capture_id"] = data_capture.save_capture("validate", img, result, base_dir=CAPTURE_DIR)
+    _maybe_capture("validate", img, result)
     return jsonify(result)
 
 
 @app.route("/nn/feedback", methods=["POST"])
 @require_api_key
 def nn_feedback():
-    """Attaches a real-world outcome to a capture saved by /nn/align or
-    /nn/validate (when CAPTURE_TRAINING_DATA is on). This is the second
-    half of the data-collection loop: the model's own prediction isn't
-    training data, but prediction + a later-confirmed ground truth is —
-    see data_capture.py."""
+    """Attaches a real-world outcome to a capture saved by /nn/align,
+    /nn/validate or /nn/detect_boxes[_yolo] (when CAPTURE_TRAINING_DATA is
+    on). This is the second half of the data-collection loop: the model's
+    own prediction isn't training data, but prediction + a later-confirmed
+    ground truth is — see data_capture.py.
+
+    label_source ('human' | 'model' | 'automated') and labeler record who
+    made the label; vision_eval.py refuses to report on anything but a
+    person's labels. board_id / session_id may fill in a capture saved
+    without them."""
     data = request.get_json(silent=True) or {}
     kind = data.get("kind")
     capture_id = data.get("capture_id")
     ground_truth = data.get("ground_truth")
-    if kind not in ("align", "validate") or not capture_id or ground_truth is None:
-        return jsonify({"ok": False, "error": "kind ('align'|'validate'), capture_id, and ground_truth are required"}), 400
+    if kind not in data_capture.KINDS or not capture_id or ground_truth is None:
+        return jsonify({"ok": False, "error": "kind ('align'|'validate'|'detect'), capture_id, and ground_truth are required"}), 400
 
-    updated = data_capture.record_feedback(kind, capture_id, ground_truth, base_dir=CAPTURE_DIR)
+    try:
+        updated = data_capture.record_feedback(
+            kind, capture_id, ground_truth, base_dir=CAPTURE_DIR,
+            label_source=data.get("label_source"), labeler=data.get("labeler"),
+            board_id=data.get("board_id"), session_id=data.get("session_id"),
+        )
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
     if updated is None:
         return jsonify({"ok": False, "error": "no capture found for that kind/capture_id"}), 404
     return jsonify({"ok": True, "capture": updated})

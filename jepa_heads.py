@@ -307,6 +307,23 @@ def _to_tensor(pil_img):
     return torch.from_numpy(arr.transpose(2, 0, 1)).float()
 
 
+def predict_alignment(pil_img, align_cnn, align_head):
+    """Trained align path on one frame, shared by /nn/align and
+    vision_eval.py. Returns (theta_deg, dx_px, dy_px) in the frame's own
+    pixels. The head sees the frame resized to WIN_SIZE x WIN_SIZE and
+    regresses offsets in that 64px space, so they're scaled back by each
+    axis's resize factor (a no-op for a 64px crop); without that, a 640px
+    camera frame's offset came out 10x too small before the mm conversion."""
+    w, h = pil_img.size
+    x = _to_tensor(pil_img.resize((WIN_SIZE, WIN_SIZE))).unsqueeze(0)
+    with torch.no_grad():
+        out = align_head(align_cnn(x))[0]
+    theta = math.degrees(math.atan2(float(out[0]), float(out[1])))
+    dx_px = float(out[2]) * MAX_OFFSET_PX * (w / WIN_SIZE)
+    dy_px = float(out[3]) * MAX_OFFSET_PX * (h / WIN_SIZE)
+    return theta, dx_px, dy_px
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Training
 # ─────────────────────────────────────────────────────────────────────────

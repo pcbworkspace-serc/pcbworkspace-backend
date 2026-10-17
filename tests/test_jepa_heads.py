@@ -113,3 +113,19 @@ def test_save_and_load_roundtrip(tmp_path):
 def test_load_heads_missing_file_returns_none():
     cnn, head, validate_head, meta = jh.load_heads(path="does_not_exist_anywhere.pt")
     assert cnn is None and head is None and validate_head is None and meta is None
+
+
+def test_predict_alignment_returns_offsets_in_frame_pixels():
+    """The head regresses offsets in its 64px input space; predict_alignment
+    must scale them back to the caller's frame, per axis."""
+    from PIL import Image
+
+    class FixedHead(torch.nn.Module):
+        def forward(self, x):
+            return torch.tensor([[0.0, 1.0, 0.5, -0.25]]).repeat(x.shape[0], 1)
+
+    identity = torch.nn.Identity()
+    theta, dx, dy = jh.predict_alignment(Image.new("RGB", (64, 64)), identity, FixedHead())
+    assert (round(theta, 6), dx, dy) == (0.0, 0.5 * jh.MAX_OFFSET_PX, -0.25 * jh.MAX_OFFSET_PX)
+    theta, dx, dy = jh.predict_alignment(Image.new("RGB", (640, 320)), identity, FixedHead())
+    assert (dx, dy) == (0.5 * jh.MAX_OFFSET_PX * 10, -0.25 * jh.MAX_OFFSET_PX * 5)
