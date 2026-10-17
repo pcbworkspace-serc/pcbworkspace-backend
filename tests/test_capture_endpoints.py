@@ -90,9 +90,13 @@ def test_capture_records_board_session_and_human_labeler(app, client, monkeypatc
 def test_detect_endpoint_captures_for_box_labeling(app, client, monkeypatch, tmp_path):
     monkeypatch.setattr(app, "CAPTURE_TRAINING_DATA", True)
     monkeypatch.setattr(app, "CAPTURE_DIR", str(tmp_path))
-    r = client.post("/nn/detect_boxes", data={"image": (_make_rect_png_bytes(), "t.png"), "board_id": "B1"},
+    r = client.post("/nn/detect_boxes", data={"image": (_make_rect_png_bytes(), "t.png"), "board_id": "B1",
+                                              "frame_source": "camera"},
                     content_type="multipart/form-data")
     capture_id = r.get_json()["capture_id"]
+    import json
+    sidecar = json.loads((tmp_path / "detect" / f"{capture_id}.json").read_text())
+    assert sidecar["capture_context"]["frame_source"] == "camera"
     r = client.post("/nn/feedback", json={
         "kind": "detect", "capture_id": capture_id,
         "ground_truth": {"boxes": [{"class": "R", "box": [70, 85, 130, 115]}]},

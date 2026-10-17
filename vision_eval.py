@@ -37,6 +37,10 @@ What makes it refuse (exit 2, nothing reported):
     synthetic (capture_context.synthetic, as the tests write) is evaluated
     but the report says SYNTHETIC on every top-level field that matters.
 
+Frames the frontend reports as a 3D scene render or a bundled dataset
+sample (capture_context.frame_source) aren't photos of SERC boards; they
+are left out whatever their labels say, and counted.
+
 The split is by board/session, never by frame: frames that share a
 board_id or a session_id are joined into one group (union-find), and a
 group is held out when any of its ids hashes into the test fraction. A
@@ -68,6 +72,7 @@ import data_capture
 HARNESS_VERSION = "1"
 Z_95 = 1.959963984540054
 EVAL_KINDS = ("detect", "align")
+NOT_SERC_SOURCES = ("scene_render", "sample")
 REPO_ROOT = Path(__file__).resolve().parent
 
 
@@ -267,6 +272,10 @@ def load_records(capture_dir):
             rec["_key"] = f"{kind}/{rec['capture_id']}"
             records.append(rec)
     return records
+
+
+def _frame_source(rec):
+    return (rec.get("capture_context") or {}).get("frame_source")
 
 
 def _is_synthetic(rec):
@@ -648,7 +657,12 @@ def evaluate(capture_dir, detectors=None, aligners=None, cfg=None, trained_on=No
     if cfg.px_per_mm is not None and not cfg.px_per_mm_source:
         raise ValueError("px_per_mm needs px_per_mm_source: state where the scale came from")
 
-    records = load_records(capture_dir)
+    all_records = load_records(capture_dir)
+    records = [r for r in all_records if _frame_source(r) not in NOT_SERC_SOURCES]
+    sources = {}
+    for r in all_records:
+        name = _frame_source(r) or "unrecorded"
+        sources[name] = sources.get(name, 0) + 1
     synthetic = [_is_synthetic(r) for r in records]
     if any(synthetic) and not all(synthetic):
         raise EvalRefused("synthetic and real captures are mixed in one capture dir",
@@ -719,6 +733,8 @@ def evaluate(capture_dir, detectors=None, aligners=None, cfg=None, trained_on=No
         "split": {
             "unit": "board/session group (frames sharing a board_id or session_id)",
             "n_labeled_frames": len(records),
+            "labeled_frames_by_source": sources,
+            "n_excluded_not_serc_photo": len(all_records) - len(records),
             "n_groups": len(members),
             "n_test_groups": len(test_groups),
             "test_groups": test_groups,

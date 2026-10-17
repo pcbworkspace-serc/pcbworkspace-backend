@@ -263,6 +263,10 @@ def _maybe_capture(kind, img, result, px_per_mm=None):
     def field(name):
         return (request.form.get(name) or request.args.get(name) or "").strip() or None
     context = {"image_size": list(img.size)}
+    # camera | upload | sample | scene_render, as the frontend reports it;
+    # vision_eval.py never evaluates renders or bundled dataset samples
+    if field("frame_source"):
+        context["frame_source"] = field("frame_source")
     if px_per_mm:
         context["px_per_mm"] = px_per_mm
     result["capture_id"] = data_capture.save_capture(

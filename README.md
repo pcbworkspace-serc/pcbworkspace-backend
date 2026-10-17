@@ -16,7 +16,9 @@ number once people have labeled real frames.
 
 **1. Collect frames.** Start the server with `CAPTURE_TRAINING_DATA=1`. Send
 `board_id` and `session_id` as form fields with every `/nn/align`,
-`/nn/detect_boxes` or `/nn/detect_boxes_yolo` request. Each frame is saved
+`/nn/detect_boxes` or `/nn/detect_boxes_yolo` request, plus `frame_source`
+(`camera`, `upload`, `sample` or `scene_render`). The frontend does this.
+Renders and bundled dataset samples are never evaluated. Each frame is saved
 under `CAPTURE_DIR/<kind>/` together with its `capture_id`, and with the live
 `px_per_mm` if a calibration is saved.
 

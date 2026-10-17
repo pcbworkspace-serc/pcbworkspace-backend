@@ -304,6 +304,24 @@ def test_near_duplicates_across_the_split_are_reported(tmp_path):
     assert report["split"]["cross_split_near_duplicates"]["count"] == 1
 
 
+def test_renders_and_dataset_samples_are_never_evaluated(tmp_path):
+    """The frontend tags each frame's source. A 3D-scene render or a bundled
+    public-dataset sample isn't a photo of a SERC board, even if someone
+    labels it and gives it a board id."""
+    def add(seed, source, board):
+        cid = dc.save_capture("align", _rect_image(seed), {}, base_dir=str(tmp_path), board_id=board,
+                              context={**SYNTHETIC, "frame_source": source})
+        dc.record_feedback("align", cid, {"delta_theta_deg": 0.0}, base_dir=str(tmp_path),
+                           label_source="human", labeler="fixture-labeler")
+    add(800, "camera", "B1")
+    add(801, "scene_render", "B2")
+    add(802, "sample", "B3")
+    report = ve.evaluate(tmp_path, cfg=_cfg(), aligners={"x": lambda img: {"available": True, "delta_theta_deg": 0.0}})
+    assert report["alignment"]["n_frames"] == 1
+    assert report["split"]["n_excluded_not_serc_photo"] == 2
+    assert report["split"]["labeled_frames_by_source"] == {"camera": 1, "scene_render": 1, "sample": 1}
+
+
 def test_split_manifest_partitions_ids(tmp_path):
     cfg = _cfg(test_fraction=0.5)
     test_board, train_board = _board_on_side("test", cfg), _board_on_side("train", cfg)
