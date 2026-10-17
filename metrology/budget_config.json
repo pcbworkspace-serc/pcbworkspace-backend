@@ -1,0 +1,222 @@
+{
+  "_about": "Inputs to metrology/error_budget.py. Every number carries its source. 'assumed' means nobody has measured it yet: when you measure it, replace the value and change the source to say how and when.",
+  "geometry": {
+    "l1_mm": {"value": 150.0, "source": "Rev 2 hardware doc; layout_engine.ARM_L1_MM"},
+    "l2_mm": {"value": 180.0, "source": "Rev 2 hardware doc; layout_engine.ARM_L2_MM"},
+    "base_offset_mm": {"value": [190.0, 40.0], "source": "layout_engine.ARM_BASE_OFFSET_MM, an unmeasured placeholder"},
+    "board_mm": {"value": [62.0, 42.0], "source": "flask_server.DEFAULT_BOARD_W_MM / DEFAULT_BOARD_H_MM"},
+    "elbow": {"value": 1, "source": "assumed: elbow bends counter-clockwise (theta2 > 0)"}
+  },
+  "approach": {"value": "bidirectional", "source": "assumed: firmware doesn't yet approach every target from the same side"},
+  "unidirectional_residual_frac": {"value": 0.2, "source": "assumed: share of a direction-dependent error left after one-sided approach plus calibration"},
+  "joints": {
+    "j1": {
+      "label": "J1 base",
+      "full_steps_per_rev": {"value": 200, "source": "1.8 deg NEMA 17 (hardware doc). pcb_robot_workspace/config.yaml says 'steps: 400', so confirm the motor"},
+      "microsteps": {"value": 16, "source": "assumed TMC2209 setting"},
+      "gear_ratio": {"value": 1.0, "source": "hardware doc: the arm connector locks onto the motor shaft (direct drive)"},
+      "reducer": {"value": "direct drive", "source": "hardware doc: no reducer"},
+      "reducer_stiffness_nm_per_rad": {"value": 0, "source": "no reducer (0 = rigid)"},
+      "reducer_backlash_deg": {"value": 0.0, "source": "no reducer"},
+      "reducer_transmission_error_deg": {"value": 0.0, "source": "no reducer"},
+      "step_accuracy_pct": {"value": 5.0, "source": "typical hybrid-stepper datasheet: +/-5% of a full step, no load"},
+      "holding_torque_nm": {"value": 0.4, "source": "assumed typical 40 mm NEMA 17: read your motor's datasheet"},
+      "hold_current_frac": {"value": 0.55, "source": "hardware doc: hold current at 50-60% of run current"},
+      "load_torque_nm": {"value": 0.02, "source": "assumed: vacuum hose and wiring drag plus bearing friction. Measure it"},
+      "backlash_deg": {"value": 0.1, "source": "assumed with the spring anti-backlash nuts; the hardware doc's figure without them is 0.3 deg"},
+      "zero_uncertainty_deg": {"value": 1.0, "source": "assumed: where the joint really is at commanded zero, before calibration"},
+      "homing_repeatability_deg": {"value": 0.05, "source": "assumed limit switch; not used when an absolute encoder sets zero"},
+      "encoder": {
+        "present": {"value": true, "source": "hardware doc: AS5048A on the base and shoulder shafts"},
+        "location": {"value": "motor", "source": "hardware doc: mounted on the motor shaft"},
+        "closed_loop": {"value": false, "source": "assumed: no closed-loop firmware yet"},
+        "bits": {"value": 14, "source": "AS5048A datasheet"},
+        "inl_deg": {"value": 0.8, "source": "AS5048A datasheet: INL +/-0.8 deg at optimum magnet placement, 25 C"},
+        "linearized": {"value": false, "source": "no per-unit linearization yet"},
+        "linearized_residual_deg": {"value": 0.05, "source": "AS5048A datasheet: 0.05 deg system accuracy, only with linearization and averaging in the MCU"}
+      }
+    },
+    "j2": {
+      "label": "J2 elbow",
+      "full_steps_per_rev": {"value": 200, "source": "assumed 1.8 deg NEMA 14 (hardware doc names NEMA 14, not its step angle)"},
+      "microsteps": {"value": 16, "source": "assumed TMC2209 setting"},
+      "gear_ratio": {"value": 1.0, "source": "hardware doc: NEMA 14 bolted into the elbow connector drives the forearm directly"},
+      "reducer": {"value": "direct drive", "source": "hardware doc: no reducer"},
+      "reducer_stiffness_nm_per_rad": {"value": 0, "source": "no reducer (0 = rigid)"},
+      "reducer_backlash_deg": {"value": 0.0, "source": "no reducer"},
+      "reducer_transmission_error_deg": {"value": 0.0, "source": "no reducer"},
+      "step_accuracy_pct": {"value": 5.0, "source": "typical hybrid-stepper datasheet: +/-5% of a full step, no load"},
+      "holding_torque_nm": {"value": 0.15, "source": "assumed typical NEMA 14: read your motor's datasheet"},
+      "hold_current_frac": {"value": 0.55, "source": "hardware doc: hold current at 50-60% of run current"},
+      "load_torque_nm": {"value": 0.01, "source": "assumed: hose drag at the wrist. Measure it"},
+      "backlash_deg": {"value": 0.1, "source": "assumed with the spring anti-backlash nuts; the hardware doc's figure without them is 0.3 deg"},
+      "zero_uncertainty_deg": {"value": 1.0, "source": "assumed: where the joint really is at commanded zero, before calibration"},
+      "homing_repeatability_deg": {"value": 0.05, "source": "assumed limit switch at the elbow"},
+      "encoder": {
+        "present": {"value": false, "source": "hardware doc: the two AS5048A go on base and shoulder, not the elbow"},
+        "location": {"value": "motor", "source": "hardware doc: mounted on the motor shaft"},
+        "closed_loop": {"value": false, "source": "no encoder"},
+        "bits": {"value": 14, "source": "AS5048A datasheet, if one is added"},
+        "inl_deg": {"value": 0.8, "source": "AS5048A datasheet: INL +/-0.8 deg at optimum magnet placement, 25 C"},
+        "linearized": {"value": false, "source": "no per-unit linearization yet"},
+        "linearized_residual_deg": {"value": 0.05, "source": "AS5048A datasheet: 0.05 deg system accuracy, only with linearization and averaging in the MCU"}
+      }
+    }
+  },
+  "links": {
+    "length_tolerance_mm": {"value": 0.3, "source": "assumed: tube cut length plus printed socket depth"},
+    "lateral_load_n": {"value": 0.1, "source": "assumed: hose side load at the wrist"},
+    "tube_outer_mm": {"value": 10.0, "source": "hardware doc: 10 mm square carbon tube"},
+    "tube_wall_mm": {"value": 1.0, "source": "assumed wall thickness"},
+    "tube_modulus_gpa": {"value": 70.0, "source": "assumed, conservative for pultruded carbon tube"},
+    "printed_joint_compliance_mm": {"value": 0.02, "source": "assumed tip deflection from the PETG joints under the same load"},
+    "printed_length_mm": {"value": 60.0, "source": "assumed total PETG length in the chain"},
+    "petg_cte_ppm_per_k": {"value": 68.0, "source": "typical PETG datasheet value"},
+    "temperature_swing_k": {"value": 5.0, "source": "assumed: room drift plus motor heating"}
+  },
+  "registration": {
+    "base_offset_uncertainty_mm": {"value": 5.0, "source": "assumed: the (190, 40) placeholder has never been measured"}
+  },
+  "camera_top": {
+    "px_per_mm": {"value": 12.8, "source": "assumed: 720p camera (hardware doc) seeing a 100 mm wide field"},
+    "fiducial_sigma_px": {"value": 0.2, "source": "assumed sub-pixel fiducial centroid"},
+    "fiducials_per_board": {"value": 2, "source": "assumed"},
+    "distortion_edge_pct": {"value": 1.0, "source": "assumed for a low-cost USB lens; ChArUco calibration measures it"},
+    "reprojection_rms_px": {"value": 0.3, "source": "assumed after calibration; metrology/charuco_calib.py reports the real value"},
+    "camera_height_mm": {"value": 200.0, "source": "assumed"},
+    "plane_offset_mm": {"value": 1.6, "source": "standard 1.6 mm PCB: board top vs the bed the homography was taken on"},
+    "plane_offset_after_mm": {"value": 0.16, "source": "assumed 10% board-thickness tolerance once the plane is matched"}
+  },
+  "camera_bottom": {
+    "px_per_mm": {"value": 40.0, "source": "assumed close-up of the part on the nozzle"},
+    "sigma_px": {"value": 0.3, "source": "assumed part-outline centroid noise"},
+    "scale_error_pct": {"value": 2.0, "source": "assumed before the bottom camera's mm/px is calibrated"},
+    "scale_error_after_pct": {"value": 0.2, "source": "assumed after calibration"},
+    "pick_offset_mm": {"value": 0.5, "source": "assumed typical part offset on the nozzle after a pick"},
+    "nozzle_center_uncertainty_mm": {"value": 0.2, "source": "assumed: nozzle axis position in the bottom image before nozzle-tip calibration"},
+    "rotation_sigma_deg": {"value": 0.5, "source": "assumed part-angle measurement noise"}
+  },
+  "wrist": {
+    "full_steps_per_rev": {"value": 200, "source": "assumed 1.8 deg NEMA 8"},
+    "microsteps": {"value": 16, "source": "assumed TMC2209 setting"}
+  },
+  "nozzle": {
+    "runout_tir_mm": {"value": 0.05, "source": "assumed: NEMA 8 hollow shaft plus Juki holder. Measure it"},
+    "runout_after_mm": {"value": 0.01, "source": "assumed after runout compensation"}
+  },
+  "process": {
+    "release_slip_mm": {"value": 0.03, "source": "assumed: part shift when vacuum releases"},
+    "settle_amplitude_mm": {"value": 0.02, "source": "assumed residual vibration after the 150 ms settle (hardware doc)"}
+  },
+  "package": {
+    "name": {"value": "0805", "source": "example package"},
+    "length_mm": {"value": 2.0, "source": "0805 nominal body length"},
+    "width_mm": {"value": 1.25, "source": "0805 nominal body width"}
+  },
+  "target": {
+    "accuracy_rms_mm": {"value": 0.15, "source": "hardware_plan_v3 section 9: positional accuracy < 0.15 mm RMS"},
+    "repeatability_std_mm": {"value": 0.1, "source": "hardware_plan_v3 section 9: repeatability < 0.1 mm std deviation"}
+  },
+  "calibration": {
+    "kinematic": {"value": false, "source": "not done"},
+    "camera": {"value": false, "source": "not done"},
+    "nozzle": {"value": false, "source": "not done"},
+    "planned_poses": {"value": 25, "source": "kinematic_fit.py plan default"},
+    "pose_margin_mm": {"value": 15.0, "source": "kinematic_fit.py plan default"},
+    "tip_measurement_sigma_mm": {"value": 0.03, "source": "assumed: top camera reading a target on the nozzle after ChArUco calibration"}
+  },
+  "scenarios": [
+    {
+      "name": "As documented: open loop, nothing calibrated",
+      "set": {}
+    },
+    {
+      "name": "+ camera, kinematic and nozzle calibration",
+      "set": {
+        "calibration.kinematic": true,
+        "calibration.camera": true,
+        "calibration.nozzle": true
+      }
+    },
+    {
+      "name": "+ one-sided approach to every target",
+      "set": {
+        "approach": "unidirectional"
+      }
+    },
+    {
+      "name": "Option A: direct drive, closed loop on linearized AS5048A at both joints",
+      "from": "+ one-sided approach to every target",
+      "set": {
+        "joints.j1.encoder.closed_loop": {"value": true, "source": "option A"},
+        "joints.j2.encoder.closed_loop": {"value": true, "source": "option A"},
+        "joints.j1.encoder.linearized": {"value": true, "source": "option A: per-unit linearization in firmware"},
+        "joints.j2.encoder.linearized": {"value": true, "source": "option A: per-unit linearization in firmware"},
+        "joints.j2.encoder.present": {"value": true, "source": "option A: second AS5048A moved from the shoulder to the elbow"},
+        "joints.j1.microsteps": {"value": 64, "source": "option A: TMC2209 at 64 microsteps"},
+        "joints.j2.microsteps": {"value": 64, "source": "option A: TMC2209 at 64 microsteps"}
+      }
+    },
+    {
+      "name": "Option B: GT2 belt 4:1, open loop",
+      "from": "+ one-sided approach to every target",
+      "set": {
+        "joints.j1.gear_ratio": {"value": 4.0, "source": "option B: GT2 20T:80T, one stage"},
+        "joints.j2.gear_ratio": {"value": 4.0, "source": "option B: GT2 20T:80T, one stage"},
+        "joints.j1.reducer": {"value": "GT2 belt 4:1", "source": "option B"},
+        "joints.j2.reducer": {"value": "GT2 belt 4:1", "source": "option B"},
+        "joints.j1.reducer_stiffness_nm_per_rad": {"value": 108.1, "source": "computed 2*(EA/L)*r^2 = 108 N*m/rad with EA 5000 N (assumed, order of magnitude: no published GT2 stiffness found; tensile-test a sample), span 60 mm (assumed), 80T pulley radius 25.5 mm"},
+        "joints.j2.reducer_stiffness_nm_per_rad": {"value": 108.1, "source": "computed 2*(EA/L)*r^2 = 108 N*m/rad with EA 5000 N (assumed, order of magnitude: no published GT2 stiffness found; tensile-test a sample), span 60 mm (assumed), 80T pulley radius 25.5 mm"},
+        "joints.j1.reducer_transmission_error_deg": {"value": 0.064, "source": "assumed: 0.02 mm pitch-circle runout on both pulleys -> 0.045 deg from the 80T plus 0.045 deg from the 20T after 4:1, combined"},
+        "joints.j2.reducer_transmission_error_deg": {"value": 0.064, "source": "assumed: 0.02 mm pitch-circle runout on both pulleys -> 0.045 deg from the 80T plus 0.045 deg from the 20T after 4:1, combined"},
+        "joints.j1.backlash_deg": {"value": 0.02, "source": "assumed: link clamped to the 80T pulley hub"},
+        "joints.j2.backlash_deg": {"value": 0.02, "source": "assumed: link clamped to the 80T pulley hub"},
+        "joints.j2.encoder.present": {"value": true, "source": "option B: second AS5048A moved to the elbow motor, for homing and missed-step checks"}
+      }
+    },
+    {
+      "name": "Option C: GT2 belt 4:1, closed loop on output-shaft AS5048A",
+      "from": "+ one-sided approach to every target",
+      "set": {
+        "joints.j1.gear_ratio": {"value": 4.0, "source": "option B: GT2 20T:80T, one stage"},
+        "joints.j2.gear_ratio": {"value": 4.0, "source": "option B: GT2 20T:80T, one stage"},
+        "joints.j1.reducer": {"value": "GT2 belt 4:1", "source": "option B"},
+        "joints.j2.reducer": {"value": "GT2 belt 4:1", "source": "option B"},
+        "joints.j1.reducer_stiffness_nm_per_rad": {"value": 108.1, "source": "computed 2*(EA/L)*r^2 = 108 N*m/rad with EA 5000 N (assumed, order of magnitude: no published GT2 stiffness found; tensile-test a sample), span 60 mm (assumed), 80T pulley radius 25.5 mm"},
+        "joints.j2.reducer_stiffness_nm_per_rad": {"value": 108.1, "source": "computed 2*(EA/L)*r^2 = 108 N*m/rad with EA 5000 N (assumed, order of magnitude: no published GT2 stiffness found; tensile-test a sample), span 60 mm (assumed), 80T pulley radius 25.5 mm"},
+        "joints.j1.reducer_transmission_error_deg": {"value": 0.064, "source": "assumed: 0.02 mm pitch-circle runout on both pulleys -> 0.045 deg from the 80T plus 0.045 deg from the 20T after 4:1, combined"},
+        "joints.j2.reducer_transmission_error_deg": {"value": 0.064, "source": "assumed: 0.02 mm pitch-circle runout on both pulleys -> 0.045 deg from the 80T plus 0.045 deg from the 20T after 4:1, combined"},
+        "joints.j1.backlash_deg": {"value": 0.02, "source": "assumed: link clamped to the 80T pulley hub"},
+        "joints.j2.backlash_deg": {"value": 0.02, "source": "assumed: link clamped to the 80T pulley hub"},
+        "joints.j1.encoder.present": {"value": true, "source": "option C"},
+        "joints.j2.encoder.present": {"value": true, "source": "option C"},
+        "joints.j1.encoder.location": {"value": "output", "source": "option C: AS5048A magnet on the joint (output) shaft"},
+        "joints.j2.encoder.location": {"value": "output", "source": "option C: AS5048A magnet on the joint (output) shaft"},
+        "joints.j1.encoder.closed_loop": {"value": true, "source": "option C"},
+        "joints.j2.encoder.closed_loop": {"value": true, "source": "option C"},
+        "joints.j1.encoder.linearized": {"value": true, "source": "option C: per-unit linearization in firmware"},
+        "joints.j2.encoder.linearized": {"value": true, "source": "option C: per-unit linearization in firmware"}
+      }
+    },
+    {
+      "name": "Option D: 50:1 strain-wave reducer, open loop, encoders check for missed steps",
+      "from": "+ one-sided approach to every target",
+      "recommended": true,
+      "set": {
+        "joints.j1.gear_ratio": {"value": 50.0, "source": "option D: 50:1 strain-wave reducer with NEMA 17 flange"},
+        "joints.j2.gear_ratio": {"value": 50.0, "source": "option D: 50:1 strain-wave reducer with NEMA 17 flange"},
+        "joints.j1.reducer": {"value": "strain-wave 50:1", "source": "option D"},
+        "joints.j2.reducer": {"value": "strain-wave 50:1", "source": "option D"},
+        "joints.j1.reducer_stiffness_nm_per_rad": {"value": 2200.0, "source": "Harmonic Drive CSF-ULW brochure, size 11, ratio 50: K1 = 0.22e4 N*m/rad (low-cost clones unverified)"},
+        "joints.j2.reducer_stiffness_nm_per_rad": {"value": 2200.0, "source": "Harmonic Drive CSF-ULW brochure, size 11, ratio 50: K1 = 0.22e4 N*m/rad (low-cost clones unverified)"},
+        "joints.j1.reducer_backlash_deg": {"value": 0.0333, "source": "Harmonic Drive CSF-ULW brochure, size 11, ratio 50: lost motion about 2 arcmin (clones claim < 20 arcsec backlash)"},
+        "joints.j2.reducer_backlash_deg": {"value": 0.0333, "source": "Harmonic Drive CSF-ULW brochure, size 11, ratio 50: lost motion about 2 arcmin (clones claim < 20 arcsec backlash)"},
+        "joints.j1.reducer_transmission_error_deg": {"value": 0.0333, "source": "assumed: 2 arcmin transmission error for a low-cost strain-wave reducer. Measure it"},
+        "joints.j2.reducer_transmission_error_deg": {"value": 0.0333, "source": "assumed: 2 arcmin transmission error for a low-cost strain-wave reducer. Measure it"},
+        "joints.j1.backlash_deg": {"value": 0.0, "source": "assumed: link bolted to the reducer's output flange, no keyed or set-screw joint"},
+        "joints.j2.backlash_deg": {"value": 0.0, "source": "assumed: link bolted to the reducer's output flange, no keyed or set-screw joint"},
+        "joints.j2.encoder.present": {"value": true, "source": "option D: second AS5048A moved to the elbow motor, for homing and missed-step checks"}
+      }
+    }
+  ]
+}
