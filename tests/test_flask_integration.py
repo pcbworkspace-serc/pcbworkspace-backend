@@ -26,6 +26,19 @@ def test_health_and_status(client):
     assert client.get("/nn/status").status_code == 200
 
 
+def test_status_labels_fpic_paper_figure_as_not_serc(client):
+    body = client.get("/nn/status").get_json()
+    assert "metrics_from_paper" not in body
+    det = body["detection_metrics"]
+    assert det["serc_boards"]["measured"] is False
+    assert "No detection measurement on SERC boards" in det["serc_boards"]["status"]
+    ref = det["fpic_paper_reference"]
+    assert ref["measured_by_serc"] is False
+    assert "FPIC" in ref["dataset"] and "not SERC" in ref["dataset"]
+    assert ref["mAP"] == 0.636
+    assert "0.636" not in body["model"]  # the model name no longer carries the paper figure
+
+
 def test_calibration_save_get_roundtrip_with_board_size(app, client):
     pixel_pts = [[0, 0], [400, 0], [400, 300], [0, 300]]
     world_pts = [[0, 0], [100, 0], [100, 75], [0, 75]]
