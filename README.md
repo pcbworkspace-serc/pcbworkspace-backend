@@ -22,6 +22,24 @@ Renders and bundled dataset samples are never evaluated. Each frame is saved
 under `CAPTURE_DIR/<kind>/` together with its `capture_id`, and with the live
 `px_per_mm` if a calibration is saved.
 
+**Where to capture.** Run capture on the lab machine next to the camera, not
+on the hosted backend. The hosted backend keeps capture off, and its
+free-tier disk is wiped whenever it restarts, so frames saved there would be
+lost. Point `CAPTURE_DIR` at a folder that gets backed up. The live site is
+built to call the hosted backend, so run the frontend locally against this
+one:
+
+```powershell
+# this repo
+$env:CAPTURE_TRAINING_DATA = "1"; $env:CAPTURE_DIR = "C:\serc-captures"; python flask_server.py
+# pcbworkspace-serc.github.io, in a second terminal
+$env:VITE_NN_URL = "http://127.0.0.1:5000"; npm run dev:vite
+```
+
+Open http://localhost:8080, run Detect on a camera photo or an upload, and
+label it in the detection window. Each capture records the board ID set when
+it was taken, so change the Board ID before detecting on a new board.
+
 **2. Label them yourself.** Send `POST /nn/feedback` with
 `{"kind", "capture_id", "label_source": "human", "labeler": "<your id>", "ground_truth": ...}`.
 Draw or measure the label independently; don't just accept the prediction
