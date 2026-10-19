@@ -40,6 +40,29 @@ Open http://localhost:8080, run Detect on a camera photo or an upload, and
 label it in the detection window. Each capture records the board ID set when
 it was taken, so change the Board ID before detecting on a new board.
 
+**How much to collect.** Labels on one board tend to be right or wrong
+together, so the board-bootstrap interval narrows with the number of
+held-out boards far more than with frames per board.
+`python plan_vision_eval.py` simulates this with the harness's own interval
+code. Under its stated assumptions (85% recall varying by board, 20 labeled
+parts per board, angle errors of about 2° per frame and 1° per board; these
+are planning assumptions, not measurements), it gives:
+
+| Held-out boards | Recall interval | Mean angle-error interval |
+|---|---|---|
+| 10 | ±6.0 pts | ±0.26° |
+| 20 | ±4.6 pts | ±0.20° |
+| 40 | ±3.4 pts | ±0.14° |
+
+- Aim for at least 20 boards. With fewer than 5, the evaluator falls back to
+  resampling frames, and that interval is too narrow.
+- No model has been trained on SERC captures yet, so run the first
+  measurement with `--test-fraction 1.0`, which holds out every labeled
+  board. Set boards aside for training (e.g. the default 0.3) only once
+  fine-tuning starts, and pass that run's `--trained-on` record.
+- Save a camera calibration before capturing. Without `px_per_mm`, the
+  report has no offset error, only angle error.
+
 **2. Label them yourself.** Send `POST /nn/feedback` with
 `{"kind", "capture_id", "label_source": "human", "labeler": "<your id>", "ground_truth": ...}`.
 Draw or measure the label independently; don't just accept the prediction
