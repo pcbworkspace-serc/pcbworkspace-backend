@@ -18,7 +18,9 @@ Five pieces:
                         possible instead of only flagging them
 """
 
+import json
 import math
+import os
 import random
 
 ALLOWED_ACTIONS = {"home", "move", "rotate", "pick", "place", "release",
@@ -40,6 +42,35 @@ ARM_L2_MM = 180.0
 # safety net layered on top of clamp_vla_action's board-bounds check, not
 # a replacement for real arm-frame calibration.
 ARM_BASE_OFFSET_MM = (190.0, 40.0)
+
+# Measured geometry, when it exists, replaces the numbers above (before the
+# functions below bind them as defaults). metrology/kinematic_fit.py writes
+# arm_calibration.json from tip positions measured on the real arm. A
+# synthetic calibration (a made-up arm, for exercising the pipeline) is
+# never loaded.
+ARM_CALIBRATION_PATH = os.environ.get("ARM_CALIBRATION_PATH", "arm_calibration.json")
+ARM_GEOMETRY_SOURCE = "placeholder"
+
+
+def _load_arm_calibration(path):
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        if data.get("synthetic"):
+            return None
+        g = data["geometry"]
+        offset = tuple(float(v) for v in g["base_offset_mm"])
+        if len(offset) != 2:
+            return None
+        return float(g["l1_mm"]), float(g["l2_mm"]), offset, data.get("created", "undated")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+_measured = _load_arm_calibration(ARM_CALIBRATION_PATH)
+if _measured:
+    ARM_L1_MM, ARM_L2_MM, ARM_BASE_OFFSET_MM, _created = _measured
+    ARM_GEOMETRY_SOURCE = "measured %s" % _created
 
 
 def check_reach(board_x, board_y, offset=ARM_BASE_OFFSET_MM, l1=ARM_L1_MM, l2=ARM_L2_MM):
@@ -66,10 +97,11 @@ def filter_unreachable_actions(actions, offset=ARM_BASE_OFFSET_MM, l1=ARM_L1_MM,
             kept.append(action)
         else:
             min_r, max_r = abs(l1 - l2), l1 + l2
+            note = ("ARM_BASE_OFFSET_MM is an unmeasured placeholder - verify against real calibration"
+                    if ARM_GEOMETRY_SOURCE == "placeholder" else "arm geometry " + ARM_GEOMETRY_SOURCE)
             warnings.append(
-                "dropped move (%.1f,%.1f) - r=%.1fmm outside arm reach envelope [%.1f,%.1f]mm"
-                " (ARM_BASE_OFFSET_MM is an unmeasured placeholder - verify against real calibration)"
-                % (action["x_mm"], action["y_mm"], r, min_r, max_r)
+                "dropped move (%.1f,%.1f) - r=%.1fmm outside arm reach envelope [%.1f,%.1f]mm (%s)"
+                % (action["x_mm"], action["y_mm"], r, min_r, max_r, note)
             )
     return kept, warnings
 
