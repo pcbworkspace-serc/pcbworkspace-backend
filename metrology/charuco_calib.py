@@ -102,13 +102,21 @@ def calibrate_intrinsics(board, images, holdout_every=5, flags=0):
     }
 
 
+def _undistort_points(points, K, dist, P, criteria):
+    """OpenCV 4 takes criteria only in undistortPointsIter; OpenCV 5 removed it
+    and takes them in undistortPoints."""
+    if hasattr(cv2, "undistortPointsIter"):
+        return cv2.undistortPointsIter(points, K, dist, None, P, criteria)
+    return cv2.undistortPoints(points, K, dist, None, P, criteria=criteria)
+
+
 def undistort_pixels(points, camera_matrix, dist_coeffs):
     """Distorted pixel coordinates -> where an ideal (distortion-free) camera
     with the same K would have seen them, still in pixels."""
     pts = np.asarray(points, dtype=np.float64).reshape(-1, 1, 2)
     K = np.asarray(camera_matrix, dtype=np.float64)
-    out = cv2.undistortPointsIter(pts, K, np.asarray(dist_coeffs, dtype=np.float64), None, K,
-                                  (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 50, 1e-9))
+    out = _undistort_points(pts, K, np.asarray(dist_coeffs, dtype=np.float64), K,
+                            (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 50, 1e-9))
     return out.reshape(-1, 2)
 
 
@@ -174,8 +182,8 @@ def render_view(board_img, px_per_mm, K, dist, rvec, tvec, size, noise=2.0, seed
     w, h = size
     u, v = np.meshgrid(np.arange(w, dtype=np.float64), np.arange(h, dtype=np.float64))
     pix = np.stack([u.ravel(), v.ravel()], axis=1).reshape(-1, 1, 2)
-    norm = cv2.undistortPointsIter(pix, K, dist, None, None,
-                                   (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 30, 1e-9)).reshape(-1, 2)
+    norm = _undistort_points(pix, K, dist, None,
+                             (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 30, 1e-9)).reshape(-1, 2)
     R, _ = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64))
     Hn = np.column_stack([R[:, 0], R[:, 1], np.asarray(tvec, dtype=np.float64).ravel()])
     plane = np.linalg.solve(Hn, np.column_stack([norm, np.ones(len(norm))]).T).T
